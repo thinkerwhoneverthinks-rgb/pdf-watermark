@@ -1,6 +1,7 @@
 """Handwritten target recognition via the Gemini Vision API."""
 
 import asyncio
+import datetime
 import json
 import re
 
@@ -54,6 +55,20 @@ def _call_gemini(image_bytes: bytes) -> dict:
     except Exception as e:
         raise ValueError(f"Gemini API error: {str(e)[:100]}")
 
+
+def sanitize_date(raw_date: str) -> str:
+    """Validate date and fallback to today if it's too old (would be pruned) or invalid."""
+    if not raw_date:
+        return today_str()
+    try:
+        parsed_date = datetime.date.fromisoformat(raw_date)
+        cutoff = datetime.date.today() - datetime.timedelta(days=config.STATE_RETENTION_DAYS)
+        if parsed_date < cutoff:
+            return today_str()
+        return raw_date
+    except ValueError:
+        return today_str()
+
 def _extract_date_from_text(text: str) -> str | None:
     """Extract date if present in text."""
     match = re.search(r"\d{4}-\d{2}-\d{2}", text)
@@ -68,7 +83,7 @@ def parse_text_strict(raw_text: str) -> dict:
         raise ValueError("No text provided")
     
     # Extract date if present
-    date = _extract_date_from_text(text) or today_str()
+    date = sanitize_date(_extract_date_from_text(text) or today_str())
     
     # Split by lines and identify subject blocks
     lines = [re.sub(r"\s+", " ", ln).strip() for ln in text.splitlines() if ln.strip()]
@@ -200,8 +215,7 @@ async def vision_import(m: Message, storage: TelegramStorage):
         image_bytes = buffer.read()
         parsed = await asyncio.to_thread(_call_gemini, image_bytes)
 
-        raw_date = str(parsed.get("date") or "")
-        date = raw_date if re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw_date) else today_str()
+        date = sanitize_date(str(parsed.get("date") or ""))
 
         specs = specs_from_parsed(parsed)
         if not specs:
@@ -222,12 +236,18 @@ async def vision_import(m: Message, storage: TelegramStorage):
 @router.message(F.text, F.chat.type == "private")
 async def text_targets_import(m: Message, storage: TelegramStorage, state: FSMContext):
     """Import targets from text. Try strict parsing first, then offer AI fallback."""
-    # Skip if user is in another FSM state
+    text = (m.text or "").strip()
+
+    # Check if text looks like a multiline list of targets
+    is_multiline_targets = len(text.splitlines()) > 1 and re.search(r"(?i)(lecture|revision|question|chem|physics|dpp|notes|target|lec|ques)", text)
+
+    # Skip if user is in another FSM state, UNLESS they are pasting multiline targets
     current_state = await state.get_state()
     if current_state:
-        return
-    
-    text = (m.text or "").strip()
+        if is_multiline_targets:
+            await state.clear()
+        else:
+            return
     if not text or text.startswith("/"):
         return
     
@@ -283,7 +303,7 @@ async def use_ai_parsing(cb: CallbackQuery, state: FSMContext, storage: Telegram
     
     try:
         parsed = await asyncio.to_thread(parse_text_with_ai, original_text)
-        date = parsed.get("date") or today_str()
+        date = sanitize_date(str(parsed.get("date") or ""))
         specs = specs_from_parsed(parsed)
         
         if not specs:
