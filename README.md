@@ -49,16 +49,16 @@ A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, an
   * **Shared Topic Support**: 3–10+ study buddies can run `/set` in the **same group topic**. Each student gets their own clean, separate checklist message in that topic.
 * **Clean Clickable Name Headers**:
   * Instead of long text with `@usernames`, checklist headers display a clean clickable link to the user's profile:
-    > 🎯 **<a href="#">Anurag</a>'s Targets • `2026-10-04`**
+    > 🎯 **<a href="#">Alice</a>'s Targets • `2026-10-04`**
   * Works perfectly even if users do not have a Telegram `@username` configured.
 * **Click Authorization (Anti-Trolling)**:
   * Only the owner of the checklist can tap its buttons. If another group member taps a button on someone else's checklist, the bot displays a friendly alert:
     > *"⚠️ This is not your checklist! You can only mark your own targets."*
 * **Group Motivation & Celebrations 🔥**:
   * When a user clicks **`🏁 Finish Day`**, the bot posts a celebration shoutout in the linked topic:
-    > *"🎉 **Anurag** just completed today's study targets (5/5 • 100%)! 🔥"*
+    > *"🎉 **Alice** just completed today's study targets (5/5 • 100%)! 🔥"*
   * When a user inputs test scores via `[📝 Enter Score]`, the bot announces the achievement in the topic:
-    > *"🎊 **Anurag** scored **650/720** on their test! 🚀"*
+    > *"🎊 **Alice** scored **650/720** on their test! 🚀"*
 
 ---
 
