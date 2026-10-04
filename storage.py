@@ -244,9 +244,21 @@ class TelegramStorage:
         return ids
 
     async def publish_pair(self, date: str, dm_chat_id: int) -> int:
-        """Post the checklist to the topic AND the DM, remember both IDs."""
+        """Post the checklist to the topic AND the DM, or refresh existing message."""
         state = await self.load()
         day = state["dates"][date]
+
+        # If an active message pair already exists for today, update it in place
+        if day.get("pairs"):
+            pair_index = len(day["pairs"]) - 1
+            updated = await self.sync_pair(date, pair_index)
+            if updated:
+                try:
+                    await self.bot.send_message(dm_chat_id, "✅ Today's checklist updated!")
+                except Exception:
+                    pass
+                return pair_index
+
         pair_index = len(day["pairs"])
         text = render_text(date, day["tasks"])
         kb = build_keyboard(date, pair_index, day["tasks"])
@@ -272,7 +284,7 @@ class TelegramStorage:
         await self.save(state)
         return pair_index
 
-    async def sync_pair(self, date: str, pair_index: int) -> None:
+    async def sync_pair(self, date: str, pair_index: int) -> bool:
         """Re-render and edit BOTH the DM and the topic checklist."""
         state = await self.load()
         day = state["dates"][date]
@@ -286,7 +298,8 @@ class TelegramStorage:
                 jobs.append(safe_edit_message(
                     self.bot, target["chat_id"], target["message_id"], text, kb
                 ))
-        await asyncio.gather(*jobs)
+        results = await asyncio.gather(*jobs)
+        return any(results) if results else False
 
     async def toggle_task(self, date: str, pair_index: int, task_id: str) -> bool:
         state = await self.load()
