@@ -1,4 +1,5 @@
-"""Guided, step-by-step target creation via aiogram FSM (the /new flow)."""
+import json
+import re
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -12,208 +13,158 @@ from aiogram.types import (
 )
 
 from storage import TelegramStorage, render_text, today_str
+import config
 
 router = Router()
 
-SUBJECTS = ["Physics", "Chemistry", "Botany", "Zoology"]
-TASK_TYPES = ["Lecture", "Notes-making", "Revision", "NCERT read"]
 
-
-class NewTarget(StatesGroup):
+class TargetFSM(StatesGroup):
     subject = State()
-    custom_subject = State()
-    chapter = State()
-    task_type = State()
-    custom_type = State()
-    lecture_count = State()
-    notes = State()
-    test_name = State()
+    task = State()
+    count = State()
+    custom_task = State()
 
 
-def subject_kb() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=s, callback_data=f"subj|{s}")] for s in SUBJECTS]
-    rows.append([
-        InlineKeyboardButton(text="📝 TEST", callback_data="subj|TEST"),
-        InlineKeyboardButton(text="✏️ Custom", callback_data="subj|CUSTOM"),
-    ])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+# --------------------------------------------------------------------------- #
+#  Help Command
+# --------------------------------------------------------------------------- #
+@router.message(Command("help"), F.chat.type == "private")
+async def cmd_help(m: Message):
+    help_text = (
+        "🤖 <b>Welcome to your Daily Target Bot!</b>\n\n"
+        "Here are 3 ways to add your targets:\n\n"
+        "<b>1️⃣ Web App UI (Recommended):</b>\n"
+        "Click the 'Open Web App' button below to use the easy interface.\n\n"
+        "<b>2️⃣ Quick Syntax (/target):</b>\n"
+        "Send a message like: <code>/target phy L2 Q50 ncert Thermodynamics</code>\n\n"
+        "<b>3️⃣ Direct Text:</b>\n"
+        "Just send your targets in plain text like:\n"
+        "<i>CHEM\nLECTURE - 2 lec\nQUESTION - DPP 5</i>\n"
+    )
+
+    if m.chat.type == "private":
+        kb = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="Open Web App", web_app=WebAppInfo(url=config.WEBAPP_URL))]],
+            resize_keyboard=True
+        )
+        await m.answer(help_text, reply_markup=kb)
+    else:
+        await m.answer(help_text)
+
+async def cmd_start(m: Message):
+    await cmd_help(m)
 
 
-def type_kb() -> InlineKeyboardMarkup:
-    rows = [[InlineKeyboardButton(text=t, callback_data="type|" + t)] for t in TASK_TYPES]
-    rows.append([InlineKeyboardButton(text="✏️ Custom", callback_data="type|CUSTOM")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+# --------------------------------------------------------------------------- #
+#  Method 1: Web App Data Handler
+# --------------------------------------------------------------------------- #
+@router.message(F.web_app_data, F.chat.type == "private")
+async def handle_webapp_data(m: Message, storage: TelegramStorage):
+    try:
+        data_list = json.loads(m.web_app_data.data)
+        if isinstance(data_list, dict):
+            # Fallback for old cached webapp payloads
+            data_list = [data_list]
+
+        all_specs = []
+        for data in data_list:
+            subject = data.get("subject", "General")
+            chapter = data.get("chapter", "")
+            task_type = data.get("type", "Task")
+            count = data.get("count", 1)
+            details = data.get("details", "")
+
+            all_specs.extend(_build_specs_from_task(subject, task_type, count, details, chapter))
+
+        date = today_str()
+        await storage.add_tasks(date, all_specs)
+        # Assuming publish_pair is updated to refresh the existing checklist for today
+        await storage.publish_pair(date, m.chat.id)
+
+    except Exception as e:
+        await m.answer(f"❌ Failed to process WebApp data: {e}")
 
 
-def add_more_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="➕ Add another task", callback_data="more|yes"),
-        InlineKeyboardButton(text="🚀 Publish", callback_data="more|publish"),
-    ]])
+# --------------------------------------------------------------------------- #
+#  Method 2: Quick Syntax Parsing (/target)
+# --------------------------------------------------------------------------- #
+@router.message(Command("target"), F.chat.type == "private")
+async def cmd_target(m: Message, storage: TelegramStorage):
+    text = m.text.replace("/target", "", 1).strip()
+    if not text:
+        return await m.answer("Usage: /target phy L2 Q50 ncert custom topic")
 
+    parts = text.split()
+    subject = "General"
 
-async def finish(m: Message, state: FSMContext, storage: TelegramStorage) -> None:
-    data = await state.get_data()
-    specs: list = data.get("specs", [])
+    # Check first part for subject
+    first = parts[0].lower()
+    if first in ["phy", "physics"]:
+        subject = "Physics"
+        parts = parts[1:]
+    elif first in ["chem", "chemistry"]:
+        subject = "Chemistry"
+        parts = parts[1:]
+    elif first in ["bio", "biology"]:
+        subject = "Biology"
+        parts = parts[1:]
+    elif first == "test":
+        subject = "Test"
+        parts = parts[1:]
+
+    specs = []
+    custom_parts = []
+
+    tasks_to_add = [] # (type, count)
+
+    for part in parts:
+        if re.match(r"^L\d+$", part, re.IGNORECASE):
+            tasks_to_add.append(("Lecture", int(part[1:])))
+        elif re.match(r"^Q\d+$", part, re.IGNORECASE):
+            tasks_to_add.append(("Questions", int(part[1:])))
+        elif part.lower() in ["ncert", "rev", "revision", "notes"]:
+            ttype = "NCERT" if part.lower() == "ncert" else ("Revision" if part.lower().startswith("rev") else "Short Notes")
+            tasks_to_add.append((ttype, 1))
+        else:
+            custom_parts.append(part)
+
+    chapter = " ".join(custom_parts) if custom_parts else ""
+
+    for ttype, count in tasks_to_add:
+        specs.extend(_build_specs_from_task(subject, ttype, count, "", chapter))
+
     if not specs:
-        await m.answer("Nothing to publish — add at least one task. Use /new to start again.")
-        await state.clear()
-        return
+        return await m.answer("No valid targets found in quick syntax.")
+
     date = today_str()
     await storage.add_tasks(date, specs)
-    await storage.publish_pair(date, data["owner_id"])
-    await state.clear()
-    await m.answer("✅ Target list published to your DM and the group topic!")
+    await storage.publish_pair(date, m.chat.id)
 
 
-# --------------------------------------------------------------------------- #
-#  Entry points
-# --------------------------------------------------------------------------- #
-@router.message(Command("start"), F.chat.type == "private")
-async def cmd_start(m: Message):
-    await m.answer(
-        "👋 <b>Daily Target Tracker</b>\n\n"
-        "• /new — add targets step by step\n"
-        "• Send a photo of handwritten targets and I'll import them automatically\n"
-        "• /today — show today's progress"
-    )
-
-
-@router.message(Command("today"), F.chat.type == "private")
-async def cmd_today(m: Message, storage: TelegramStorage):
-    state = await storage.load()
-    day = state.get("dates", {}).get(today_str())
-    if not day or not day["tasks"]:
-        return await m.answer("No targets set for today yet. Use /new or send a photo! 🙂")
-    await m.answer(render_text(today_str(), day["tasks"]))
-
-
-@router.message(Command("new"), F.chat.type == "private")
-async def cmd_new(m: Message, state: FSMContext):
-    await state.set_state(NewTarget.subject)
-    await state.update_data(specs=[], owner_id=m.from_user.id)
-    await m.answer("Step 1️⃣ — Choose the subject:", reply_markup=subject_kb())
-
-
-# --------------------------------------------------------------------------- #
-#  Step 1: subject
-# --------------------------------------------------------------------------- #
-@router.callback_query(NewTarget.subject, F.data.startswith("subj|"))
-async def pick_subject(cb: CallbackQuery, state: FSMContext):
-    choice = cb.data.split("|", 1)[1]
-    await cb.answer()
-    if choice == "CUSTOM":
-        await state.set_state(NewTarget.custom_subject)
-        return await cb.message.answer("Type the custom subject name:")
-    if choice == "TEST":
-        await state.set_state(NewTarget.test_name)
-        return await cb.message.answer("What's the name of the test? (e.g. NEET Mock #12)")
-    await state.update_data(subject=choice)
-    await state.set_state(NewTarget.chapter)
-    await cb.message.answer(f"Step 2️⃣ — Chapter name for <b>{choice}</b>:")
-
-
-@router.message(NewTarget.custom_subject, F.text)
-async def custom_subject(m: Message, state: FSMContext):
-    await state.update_data(subject=m.text.strip())
-    await state.set_state(NewTarget.chapter)
-    await m.answer(f"Step 2️⃣ — Chapter name for <b>{m.text.strip()}</b>:")
-
-
-# TEST: name -> create score task, skip straight to dispatch
-@router.message(NewTarget.test_name, F.text)
-async def test_name(m: Message, state: FSMContext, storage: TelegramStorage):
-    name = m.text.strip()
-    data = await state.get_data()
-    specs = data.get("specs", [])
-    specs.append({"label": f"TEST — {name}", "kind": "score"})
-    await state.update_data(specs=specs)
-    await finish(m, state, storage)
-
-
-# --------------------------------------------------------------------------- #
-#  Step 2: chapter
-# --------------------------------------------------------------------------- #
-@router.message(NewTarget.chapter, F.text)
-async def chapter(m: Message, state: FSMContext):
-    await state.update_data(chapter=m.text.strip())
-    await state.set_state(NewTarget.task_type)
-    await m.answer("Step 3️⃣ — Task type:", reply_markup=type_kb())
-
-
-# --------------------------------------------------------------------------- #
-#  Step 3: task type
-# --------------------------------------------------------------------------- #
-@router.callback_query(NewTarget.task_type, F.data.startswith("type|"))
-async def pick_type(cb: CallbackQuery, state: FSMContext):
-    choice = cb.data.split("|", 1)[1]
-    await cb.answer()
-    if choice == "CUSTOM":
-        await state.set_state(NewTarget.custom_type)
-        return await cb.message.answer("Type the custom task type:")
-    await state.update_data(task_type=choice)
-    if choice == "Lecture":
-        await state.set_state(NewTarget.lecture_count)
-        return await cb.message.answer("How many lectures? (send a number, e.g. 3)")
-    await state.set_state(NewTarget.notes)
-    await cb.message.answer("Optional note for this task (or send /skip):")
-
-
-@router.message(NewTarget.custom_type, F.text)
-async def custom_type(m: Message, state: FSMContext):
-    await state.update_data(task_type=m.text.strip())
-    await state.set_state(NewTarget.notes)
-    await m.answer("Optional note for this task (or send /skip):")
-
-
-# --------------------------------------------------------------------------- #
-#  Step 4: dynamic lecture splitting + optional note
-# --------------------------------------------------------------------------- #
-@router.message(NewTarget.lecture_count, F.text)
-async def lecture_count(m: Message, state: FSMContext):
-    try:
-        count = int(m.text.strip())
-        if not 1 <= count <= 50:
-            raise ValueError
-    except ValueError:
-        return await m.answer("Please send a whole number between 1 and 50.")
-    await state.update_data(lecture_count=count)
-    await state.set_state(NewTarget.notes)
-    await m.answer("Optional note for this task (or send /skip):")
-
-
-@router.message(NewTarget.notes)
-async def notes(m: Message, state: FSMContext):
-    note = "" if (m.text or "").strip().lower() in ("/skip", "skip") else (m.text or "").strip()
-    data = await state.get_data()
-    subject, chapter, ttype = data["subject"], data["chapter"], data.get("task_type", "Task")
-    specs = data.get("specs", [])
-
-    def label(kind_word: str, idx: int = None) -> str:
-        base = f"{kind_word} {idx} — {chapter} ({subject})" if idx else f"{kind_word} — {chapter} ({subject})"
-        return f"{base} · {note}" if note else base
-
-    if ttype == "Lecture" and data.get("lecture_count", 1) > 1:
-        specs += [{"label": label("Lecture", i)} for i in range(1, data["lecture_count"] + 1)]
+def _build_specs_from_task(subject: str, task_type: str, count: int, details: str, chapter: str = "") -> list:
+    specs = []
+    if task_type == "Lecture":
+        for i in range(1, count + 1):
+            specs.append({
+                "label": f"Lecture {i} ({chapter or subject})",
+                "kind": "task"
+            })
+    elif task_type == "Questions":
+        # Tracks fraction (0/50)
+        specs.append({
+            "label": f"Questions ({chapter or subject})",
+            "kind": "questions",
+            "total_q": count,
+            "solved_q": 0
+        })
+    elif task_type == "Custom":
+        specs.append({
+            "label": f"{details} ({chapter or subject})",
+            "kind": "task"
+        })
     else:
-        specs.append({"label": label(ttype)})
-    await state.update_data(specs=specs)
-
-    await state.set_state(NewTarget.subject)  # next decision: add more or publish
-    await m.answer(
-        f"Saved! You have <b>{len(specs)}</b> task(s) queued.",
-        reply_markup=add_more_kb(),
-    )
-
-
-@router.callback_query(F.data == "more|yes")
-async def add_more(cb: CallbackQuery, state: FSMContext):
-    await cb.answer()
-    await state.set_state(NewTarget.subject)
-    await cb.message.answer("Step 1️⃣ — Choose the subject:", reply_markup=subject_kb())
-
-
-@router.callback_query(F.data == "more|publish")
-async def publish(cb: CallbackQuery, state: FSMContext, storage: TelegramStorage):
-    await cb.answer()
-    await finish(cb.message, state, storage)
+        specs.append({
+            "label": f"{task_type} ({chapter or subject})",
+            "kind": "task"
+        })
+    return specs

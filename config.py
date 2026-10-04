@@ -15,10 +15,13 @@ BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN environment variable is not set")
 
-# Group where the mirrored checklist is posted (e.g. -100xxxxxxxxxx)
+# Group where the daily summary is posted (e.g. -100xxxxxxxxxx)
 GROUP_CHAT_ID: int = int(os.getenv("GROUP_CHAT_ID", "0"))
-# Forum topic id inside that group
-TOPIC_ID: int = int(os.getenv("TOPIC_ID", "0"))
+# Forum topic id inside that group for the summary
+TOPIC_THREAD_ID: int = int(os.getenv("TOPIC_THREAD_ID", "0"))
+
+# URL for the Telegram WebApp (Mini App) UI
+WEBAPP_URL: str = os.getenv("WEBAPP_URL", "")
 
 # --- Telegram-as-a-database ---
 # Chat that hosts the pinned JSON state message. Defaults to the admin DM.
@@ -30,10 +33,6 @@ STATE_TOPIC_ID: int = int(os.getenv("STATE_TOPIC_ID", "0"))
 STATE_MARKER: str = "DTT_STATE_V1::"
 STATE_MAX_LEN: int = 3900  # Telegram message limit is 4096; keep headroom
 STATE_RETENTION_DAYS: int = 14
-
-# --- Gemini ---
-GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 # --- Render ---
 PORT: int = int(os.getenv("PORT", "8080"))
