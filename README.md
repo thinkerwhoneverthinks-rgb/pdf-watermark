@@ -1,6 +1,6 @@
 # 📋 Daily Target Tracker Telegram Bot
 
-A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, and a **Telegram Mini App (WebApp)** interface that tracks daily study targets with **zero external database**. All state lives inside a pinned Telegram message, making it resilient across server restarts, redeployments, and Render free-tier sleep cycles.
+A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, and a **Telegram Mini App (WebApp)** interface that tracks daily study targets with **zero external database**. Supports multiple users and group study rooms simultaneously by persisting each user's state inside their own private pinned Telegram message.
 
 ---
 
@@ -42,24 +42,62 @@ A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, an
 
 ---
 
-### 2️⃣ Interactive Checklist & Real-Time Sync
+### 2️⃣ Multi-User & Group Study Topics (`/set`)
 
-* **Dual-Sync Mirroring**: Checklist is published to both your private DM and your study group/forum topic. Tapping a task in either location updates both messages instantly.
+* **One-Click Topic Linking (`/set`)**:
+  * Any user can link their daily targets to any group or forum topic by adding the bot to the group and sending `/set` inside their preferred topic.
+  * **Shared Topic Support**: 3–10+ study buddies can run `/set` in the **same group topic**. Each student gets their own clean, separate checklist message in that topic.
+* **Clean Clickable Name Headers**:
+  * Instead of long text with `@usernames`, checklist headers display a clean clickable link to the user's profile:
+    > 🎯 **<a href="#">Anurag</a>'s Targets • `2026-10-04`**
+  * Works perfectly even if users do not have a Telegram `@username` configured.
+* **Click Authorization (Anti-Trolling)**:
+  * Only the owner of the checklist can tap its buttons. If another group member taps a button on someone else's checklist, the bot displays a friendly alert:
+    > *"⚠️ This is not your checklist! You can only mark your own targets."*
+* **Group Motivation & Celebrations 🔥**:
+  * When a user clicks **`🏁 Finish Day`**, the bot posts a celebration shoutout in the linked topic:
+    > *"🎉 **Anurag** just completed today's study targets (5/5 • 100%)! 🔥"*
+  * When a user inputs test scores via `[📝 Enter Score]`, the bot announces the achievement in the topic:
+    > *"🎊 **Anurag** scored **650/720** on their test! 🚀"*
+
+---
+
+### 3️⃣ Interactive Checklist & Real-Time Dual Sync
+
+* **Dual-Sync Mirroring**: Checklist is published to both the user's private DM and their linked group topic. Tapping a task in either location updates both messages instantly.
+* **In-Place Updates**: Adding more targets later in the day automatically updates today's existing checklist messages without creating duplicate spam in the group topic.
 * **Interactive Question Tracking**: Increment solved questions interactively directly from inline buttons.
 * **Test Score Recording**: Tap `[📝 Enter Score]` to input exam/mock test results (e.g., `620/720`) with instant synchronization.
 * **Rate-Limit Safe**: Built-in handling for `TelegramRetryAfter` backoff to prevent API throttling during fast clicks.
 
 ---
 
-### 3️⃣ Telegram-as-a-Database (Zero External DB)
+### 4️⃣ Native Slash Command Autocomplete Menu
 
-* **No Postgres/MySQL/Redis needed**: All persistent state is serialized as JSON and stored inside a pinned state message (`DTT_STATE_V1::`) in your administrative storage chat.
-* **Auto-Pruning**: Automatically cleans up target history older than 14 days and manages state payload length to stay strictly within Telegram's 4096-character limit.
+The bot registers native Telegram command scopes so typing `/` or tapping `[/]` opens a dedicated autocomplete menu:
+* **Private DM Menu**:
+  * `/start` — 🚀 Open main menu & WebApp
+  * `/target` — ⚡ Quick targets (`/target phy L2 Q50...`)
+  * `/q` — ⚡ Short alias for `/target`
+  * `/set` — ℹ️ View or configure your linked group topic
+  * `/delete` — 🗑️ Delete targets for today or a specific date
+  * `/help` — 📖 Help guide and instructions
+* **Group & Topic Menu**:
+  * `/set` — 🔗 Link this topic for your daily targets
+  * `/help` — 📖 Help guide and instructions
+
+---
+
+### 5️⃣ Telegram-as-a-Database (Zero External DB)
+
+* **No Postgres/MySQL/Redis needed**: Each user's persistent state is serialized as JSON and stored inside a pinned state message (`DTT_STATE_V1::`) in their private DM with the bot.
+* **Unlimited Scalability**: Because each user gets their own pinned message, there is zero database contention and no shared message character limit.
+* **Auto-Pruning**: Automatically cleans up target history older than 14 days to stay strictly within Telegram's 4096-character limit.
 * **Stateless Resilience**: Bot recovers full state on startup even when container environments sleep or restart.
 
 ---
 
-### 4️⃣ Render & Cloud Ready
+### 6️⃣ Render & Cloud Ready
 
 * Built-in lightweight `aiohttp` server listening on `$PORT`.
 * Health endpoints: `GET /` and `GET /health` returning `200 OK` for continuous uptime monitoring on Render, Railway, or Fly.io.
@@ -74,13 +112,13 @@ A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, an
 ├── config.py                 # Central environment & runtime configuration
 ├── handlers/
 │   ├── __init__.py
-│   ├── fsm_entry.py          # /start, /help, /target, /q, & WebApp data handling
+│   ├── fsm_entry.py          # /start, /help, /set, /target, /q, & WebApp data handling
 │   ├── sync_callbacks.py     # Inline button callbacks, task toggling & scores
 │   └── vision_entry.py       # Plain text & multiline target parser
 ├── index.html                # Telegram WebApp (Mini App) frontend
-├── main.py                   # Bot bootstrap & aiohttp health check server
+├── main.py                   # Bot bootstrap, commands menu setup, & health check server
 ├── requirements.txt          # Python dependencies
-└── storage.py                # Telegram-as-a-database engine & message renderer
+└── storage.py                # Multi-user Telegram-as-a-database engine & message renderer
 ```
 
 ---
@@ -92,12 +130,10 @@ Create a `.env` file or define these environment variables in your deployment da
 | Variable | Required | Description |
 | :--- | :---: | :--- |
 | `BOT_TOKEN` | **Yes** | Telegram Bot API token from [@BotFather](https://t.me/BotFather) |
-| `BOT_OWNER_ID` | **Yes** | Your personal Telegram user ID (used as admin and state host) |
-| `GROUP_CHAT_ID` | No | Target group chat ID (e.g., `-100xxxxxxxxxx`) for group mirroring |
-| `TOPIC_THREAD_ID`| No | Forum topic thread ID inside the group |
 | `WEBAPP_URL` | No | Public HTTPS URL where `index.html` is hosted (e.g., GitHub Pages) |
-| `STATE_CHAT_ID` | No | Chat ID hosting the state message (defaults to `BOT_OWNER_ID`) |
-| `STATE_TOPIC_ID`| No | Forum topic ID for the state chat if applicable |
+| `GROUP_CHAT_ID` | No | Default fallback group chat ID (users can override with `/set`) |
+| `TOPIC_THREAD_ID`| No | Default fallback topic ID (users can override with `/set`) |
+| `BOT_OWNER_ID` | No | Administrator Telegram user ID |
 | `PORT` | No | Health check server port (default: `8080`, provided automatically on Render) |
 
 ---
@@ -127,9 +163,6 @@ Create a `.env` file or define these environment variables in your deployment da
 4. **Set environment variables** in a `.env` file:
    ```env
    BOT_TOKEN=123456789:ABCDefghIJKLmnOPQRstuvWXYZ
-   BOT_OWNER_ID=123456789
-   GROUP_CHAT_ID=-1001234567890
-   TOPIC_THREAD_ID=2
    WEBAPP_URL=https://yourusername.github.io/pdf-watermark/
    ```
 
@@ -164,12 +197,11 @@ Create a `.env` file or define these environment variables in your deployment da
    * **Instance Type**: `Free`
 5. Under **Environment Variables**, add:
    * `BOT_TOKEN`
-   * `BOT_OWNER_ID`
+   * `WEBAPP_URL` (optional)
    * `GROUP_CHAT_ID` (optional)
    * `TOPIC_THREAD_ID` (optional)
-   * `WEBAPP_URL` (optional)
 6. Click **Deploy Web Service**.
-   * Render runs the bot and automatically polls `GET /` on `$PORT` to keep health status healthy.
+   * Render runs the bot and automatically polls `GET /` on `$PORT` to keep the web service active.
 
 ---
 
@@ -180,6 +212,9 @@ Create a `.env` file or define these environment variables in your deployment da
 | `/start` or `/help` | Private DM | Displays interactive guide and launch button for WebApp |
 | `/target <syntax>` | Private DM | Quick command parsing (e.g. `/target phy L2 Q50 ncert`) |
 | `/q <syntax>` | Private DM | Alias for `/target` |
+| `/set` | Group / Topic | Links the specific group forum topic to your account |
+| `/set` | Private DM | Displays current linked topic status and instructions |
+| `/delete` | Private DM | Deletes today's targets or targets for a specified date |
 | Direct Multiline Text | Private DM | Parses raw subject and study target blocks |
 | WebApp Button | Private DM | Opens full visual builder for multi-target entry |
 

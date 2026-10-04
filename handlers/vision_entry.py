@@ -104,7 +104,9 @@ async def handle_text_targets(m: Message, storage: TelegramStorage):
 
     if specs:
         date = today_str()
-        await storage.add_tasks(date, specs)
-        await storage.publish_pair(date, m.chat.id)
+        user_id = m.from_user.id
+        user_name = m.from_user.full_name
+        await storage.add_tasks(user_id, date, specs)
+        await storage.publish_pair(user_id, date, m.chat.id, user_name=user_name)
     else:
         await m.answer("I couldn't understand any targets from that text. Try using /q or the UI!")

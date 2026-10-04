@@ -8,6 +8,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
 
 import config
 from handlers import fsm_entry, sync_callbacks, vision_entry
@@ -38,6 +39,28 @@ async def run_web_server() -> None:
     await asyncio.Event().wait()  # serve forever
 
 
+async def setup_bot_commands(bot: Bot) -> None:
+    """Register slash commands for autocomplete menu in Telegram UI."""
+    private_commands = [
+        BotCommand(command="start", description="🚀 Open main menu & WebApp"),
+        BotCommand(command="target", description="⚡ Quick targets (e.g. /target phy L2 Q50)"),
+        BotCommand(command="q", description="⚡ Short alias for /target"),
+        BotCommand(command="set", description="ℹ️ View or configure your linked group topic"),
+        BotCommand(command="delete", description="🗑️ Delete targets for today or a date"),
+        BotCommand(command="help", description="📖 Help guide and instructions"),
+    ]
+    group_commands = [
+        BotCommand(command="set", description="🔗 Link this topic for your daily targets"),
+        BotCommand(command="help", description="📖 Help guide and instructions"),
+    ]
+    try:
+        await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())
+        await bot.set_my_commands(group_commands, scope=BotCommandScopeAllGroupChats())
+        log.info("Bot commands autocomplete menu registered successfully")
+    except Exception as exc:
+        log.warning("Could not set bot commands menu: %s", exc)
+
+
 async def main() -> None:
     bot = Bot(token=config.BOT_TOKEN,
               default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -45,8 +68,9 @@ async def main() -> None:
 
     storage = TelegramStorage(bot)
     await storage.init()
-    log.info("State store ready (chat=%s, message=%s)",
-             storage.chat_id, storage._state_msg_id)
+    log.info("Multi-user Telegram-as-a-database storage ready")
+
+    await setup_bot_commands(bot)
 
     dp = Dispatcher(storage=MemoryStorage())
     dp["storage"] = storage  # injected into every handler as a kwarg

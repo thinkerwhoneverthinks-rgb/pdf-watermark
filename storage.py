@@ -1,14 +1,17 @@
 """Telegram-as-a-database storage layer.
 
-The whole application state lives in ONE pinned Telegram message whose body
-is compact JSON prefixed with STATE_MARKER. Whenever anything changes we
-re-serialize the state and edit the message in place, so the state survives
-Render free-tier sleeps and redeploys (Render wipes disk, Telegram does not).
+Supports multi-user tracking with zero external database.
+Each user's state lives in their own pinned Telegram message in their private DM
+with the bot, prefixed with STATE_MARKER. Whenever anything changes we re-serialize
+the state and edit the pinned message in place, surviving Render free-tier sleeps,
+server restarts, and redeployments.
 """
 
 import asyncio
 import datetime
+import html
 import json
+import logging
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -18,6 +21,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
 
+log = logging.getLogger("dtt-storage")
 MAX_EDIT_ATTEMPTS = 3
 
 
@@ -50,13 +54,16 @@ async def safe_edit_message(bot: Bot, chat_id: int, message_id: int,
             return False
         except TelegramNotFound:
             return False
+        except Exception as exc:
+            log.warning("safe_edit_message error on chat %s msg %s: %s", chat_id, message_id, exc)
+            return False
     return False
 
 
 # --------------------------------------------------------------------------- #
 #  Rendering
 # --------------------------------------------------------------------------- #
-def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], finished: bool = False) -> InlineKeyboardMarkup:
+def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], user_id: int, finished: bool = False) -> InlineKeyboardMarkup:
     if finished:
         return InlineKeyboardMarkup(inline_keyboard=[])
 
@@ -66,30 +73,40 @@ def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], finished:
             if task.get("score"):
                 label, cb = f"✅ Scored: {task['score']}", "noop"
             else:
-                label, cb = "📝 Enter Score", f"sc|{date}|{pair_index}|{task_id}"
+                label, cb = "📝 Enter Score", f"sc|{user_id}|{date}|{pair_index}|{task_id}"
             rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
         elif task.get("kind") == "questions":
             total = task.get("total_q", 0)
             solved = task.get("solved_q", 0)
-            mark = "✅" if task.get("done") else "❌"
-            label, cb = f"{mark} {task['label']} ({solved}/{total})", f"qs|{date}|{pair_index}|{task_id}"
+            mark = "✅" if task.get("done") else "⬜"
+            label, cb = f"{mark} {task['label']} ({solved}/{total})", f"qs|{user_id}|{date}|{pair_index}|{task_id}"
             rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
         else:
-            mark = "✅" if task.get("done") else "❌"
-            label, cb = f"{mark} {task['label']}", f"tg|{date}|{pair_index}|{task_id}"
-            
+            mark = "✅" if task.get("done") else "⬜"
+            label, cb = f"{mark} {task['label']}", f"tg|{user_id}|{date}|{pair_index}|{task_id}"
             rows.append([
                 InlineKeyboardButton(text=label[:64], callback_data=cb[:64])
             ])
 
     # Add Finish Day button
-    rows.append([InlineKeyboardButton(text="🏁 Finish Day", callback_data=f"finish|{date}|{pair_index}")])
+    rows.append([InlineKeyboardButton(text="🏁 Finish Day", callback_data=f"finish|{user_id}|{date}|{pair_index}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def render_text(date: str, tasks: Dict[str, dict], title: str = "📋 Daily Targets") -> str:
+def render_text(date: str, tasks: Dict[str, dict], user_id: Optional[int] = None, user_name: Optional[str] = None, title: Optional[str] = None) -> str:
     done = sum(1 for t in tasks.values() if t.get("done"))
-    lines = [f"<b>{title}</b> — <code>{date}</code>", ""]
+
+    if title:
+        header = f"<b>{title}</b> • <code>{date}</code>"
+    elif user_id and user_name:
+        escaped_name = html.escape(user_name)
+        header = f"🎯 <a href=\"tg://user?id={user_id}\">{escaped_name}</a>'s Targets • <code>{date}</code>"
+    elif user_name:
+        header = f"🎯 <b>{html.escape(user_name)}'s Targets</b> • <code>{date}</code>"
+    else:
+        header = f"🎯 <b>Daily Targets</b> • <code>{date}</code>"
+
+    lines = [header, ""]
     for task in tasks.values():
         if task.get("kind") == "score":
             status = f"🏆 {task['score']}" if task.get("score") else "📝 awaiting score"
@@ -110,42 +127,37 @@ def render_text(date: str, tasks: Dict[str, dict], title: str = "📋 Daily Targ
 #  Storage
 # --------------------------------------------------------------------------- #
 class TelegramStorage:
-    """JSON state persisted inside a pinned Telegram message."""
+    """Multi-user JSON state persisted inside each user's pinned DM message."""
 
     def __init__(self, bot: Bot):
         self.bot = bot
-        self.chat_id = config.STATE_CHAT_ID
-        self.thread_id = config.STATE_TOPIC_ID or None
-        self._lock = asyncio.Lock()
-        self._cache: Optional[Dict[str, Any]] = None
-        self._state_msg_id: Optional[int] = None
+        self._user_locks: Dict[int, asyncio.Lock] = {}
+        self._user_caches: Dict[int, Dict[str, Any]] = {}
+        self._user_msg_ids: Dict[int, int] = {}
 
-    # -- lifecycle ---------------------------------------------------------- #
+    def _get_lock(self, user_id: int) -> asyncio.Lock:
+        if user_id not in self._user_locks:
+            self._user_locks[user_id] = asyncio.Lock()
+        return self._user_locks[user_id]
+
     async def init(self) -> None:
-        raw = await self._read_raw()
-        if raw is None:
-            sent = await self.bot.send_message(
-                self.chat_id, config.STATE_MARKER + "{}",
-                message_thread_id=self.thread_id,
-            )
+        """Lifecycle initialization (optional pre-load for admin if defined)."""
+        if config.STATE_CHAT_ID:
             try:
-                await self.bot.pin_chat_message(
-                    self.chat_id, sent.message_id, disable_notification=True
-                )
+                await self.load(config.STATE_CHAT_ID)
             except Exception:
-                # Pinning needs admin rights in groups; state still works as
-                # long as nothing else gets pinned over it.
                 pass
-            self._state_msg_id = sent.message_id
-            raw = sent.text or config.STATE_MARKER + "{}"
-        self._cache = self._parse(raw)
 
-    async def _read_raw(self) -> Optional[str]:
-        chat = await self.bot.get_chat(self.chat_id)
-        pinned = getattr(chat, "pinned_message", None)
-        if pinned and pinned.text and pinned.text.startswith(config.STATE_MARKER):
-            self._state_msg_id = pinned.message_id
-            return pinned.text
+    # -- raw read / write per user ------------------------------------------- #
+    async def _read_raw(self, user_id: int) -> Optional[str]:
+        try:
+            chat = await self.bot.get_chat(user_id)
+            pinned = chat.pinned_message
+            if pinned and pinned.text and pinned.text.startswith(config.STATE_MARKER):
+                self._user_msg_ids[user_id] = pinned.message_id
+                return pinned.text
+        except Exception as exc:
+            log.debug("No pinned state for user %s: %s", user_id, exc)
         return None
 
     @staticmethod
@@ -153,28 +165,38 @@ class TelegramStorage:
         try:
             return json.loads(raw[len(config.STATE_MARKER):])
         except Exception:
-            return {"dates": {}}
+            return {"config": {}, "dates": {}}
 
-    # -- read / write ------------------------------------------------------- #
-    async def load(self) -> Dict[str, Any]:
-        async with self._lock:
-            if self._cache is None:
-                raw = await self._read_raw()
-                self._cache = self._parse(raw) if raw else {"dates": {}}
-            return self._cache
+    async def load(self, user_id: int) -> Dict[str, Any]:
+        lock = self._get_lock(user_id)
+        async with lock:
+            if user_id in self._user_caches:
+                return self._user_caches[user_id]
 
-    async def save(self, state: Dict[str, Any]) -> None:
-        async with self._lock:
-            self._cache = state
+            raw = await self._read_raw(user_id)
+            if raw:
+                state = self._parse(raw)
+            else:
+                state = {"user_id": user_id, "user_name": "", "config": {}, "dates": {}}
+
+            self._user_caches[user_id] = state
+            return state
+
+    async def save(self, user_id: int, state: Dict[str, Any]) -> None:
+        lock = self._get_lock(user_id)
+        async with lock:
+            self._user_caches[user_id] = state
             payload = self._serialize(state)
-            if self._state_msg_id is None:
-                await self.init()
-            ok = await safe_edit_message(
-                self.bot, self.chat_id, self._state_msg_id,
-                config.STATE_MARKER + payload,
-            )
-            if not ok:  # message lost (deleted/unpinned) -> recreate
-                await self._recreate_state_message(payload)
+            msg_id = self._user_msg_ids.get(user_id)
+
+            ok = False
+            if msg_id:
+                ok = await safe_edit_message(
+                    self.bot, user_id, msg_id,
+                    config.STATE_MARKER + payload,
+                )
+            if not ok:
+                await self._recreate_state_message(user_id, payload)
 
     def _serialize(self, state: Dict[str, Any]) -> str:
         self._prune(state)
@@ -184,12 +206,11 @@ class TelegramStorage:
             del state["dates"][oldest]
             payload = json.dumps(state, separators=(",", ":"), ensure_ascii=False)
 
-        # If still too large and we only have 1 date left, try pruning old pairs
+        # If still too large, prune old message pairs in remaining date
         if len(payload) > config.STATE_MAX_LEN and len(state.get("dates", {})) == 1:
             only_date = list(state["dates"].keys())[0]
             pairs = state["dates"][only_date].get("pairs", [])
             while len(payload) > config.STATE_MAX_LEN and len(pairs) > 1:
-                # remove the oldest pair to free up space
                 pairs.pop(0)
                 payload = json.dumps(state, separators=(",", ":"), ensure_ascii=False)
 
@@ -207,22 +228,21 @@ class TelegramStorage:
             except ValueError:
                 pass
 
-    async def _recreate_state_message(self, payload: str) -> None:
+    async def _recreate_state_message(self, user_id: int, payload: str) -> None:
         sent = await self.bot.send_message(
-            self.chat_id, config.STATE_MARKER + payload,
-            message_thread_id=self.thread_id,
+            user_id, config.STATE_MARKER + payload,
         )
         try:
             await self.bot.pin_chat_message(
-                self.chat_id, sent.message_id, disable_notification=True
+                user_id, sent.message_id, disable_notification=True
             )
         except Exception:
             pass
-        self._state_msg_id = sent.message_id
+        self._user_msg_ids[user_id] = sent.message_id
 
     # -- domain operations -------------------------------------------------- #
-    async def add_tasks(self, date: str, specs: List[dict]) -> List[str]:
-        state = await self.load()
+    async def add_tasks(self, user_id: int, date: str, specs: List[dict]) -> List[str]:
+        state = await self.load(user_id)
         day = state.setdefault("dates", {}).setdefault(
             date, {"pairs": [], "tasks": {}}
         )
@@ -240,18 +260,25 @@ class TelegramStorage:
                 task_data["solved_q"] = spec.get("solved_q", 0)
             day["tasks"][task_id] = task_data
             ids.append(task_id)
-        await self.save(state)
+        await self.save(user_id, state)
         return ids
 
-    async def publish_pair(self, date: str, dm_chat_id: int) -> int:
-        """Post the checklist to the topic AND the DM, or refresh existing message."""
-        state = await self.load()
-        day = state["dates"][date]
+    async def publish_pair(self, user_id: int, date: str, dm_chat_id: int, user_name: Optional[str] = None) -> int:
+        """Post checklist to the user's linked topic AND their DM, or refresh existing message."""
+        state = await self.load(user_id)
+        if user_name:
+            state["user_name"] = user_name
+        day = state.setdefault("dates", {}).setdefault(date, {"pairs": [], "tasks": {}})
+
+        # Determine target group and topic for this user
+        cfg = state.get("config", {})
+        group_id = cfg.get("group_chat_id") or config.GROUP_CHAT_ID
+        topic_id = cfg.get("topic_thread_id") or config.TOPIC_THREAD_ID
 
         # If an active message pair already exists for today, update it in place
         if day.get("pairs"):
             pair_index = len(day["pairs"]) - 1
-            updated = await self.sync_pair(date, pair_index)
+            updated = await self.sync_pair(user_id, date, pair_index)
             if updated:
                 try:
                     await self.bot.send_message(dm_chat_id, "✅ Today's checklist updated!")
@@ -260,20 +287,25 @@ class TelegramStorage:
                 return pair_index
 
         pair_index = len(day["pairs"])
-        text = render_text(date, day["tasks"])
-        kb = build_keyboard(date, pair_index, day["tasks"])
+        saved_name = state.get("user_name") or user_name or "Student"
+        text = render_text(date, day["tasks"], user_id=user_id, user_name=saved_name)
+        kb = build_keyboard(date, pair_index, day["tasks"], user_id=user_id)
 
         topic_msg = None
-        if config.GROUP_CHAT_ID and config.TOPIC_THREAD_ID:
-            topic_msg = await self.bot.send_message(
-                config.GROUP_CHAT_ID, text,
-                message_thread_id=config.TOPIC_THREAD_ID, reply_markup=kb,
-            )
+        if group_id and topic_id:
+            try:
+                topic_msg = await self.bot.send_message(
+                    group_id, text,
+                    message_thread_id=topic_id, reply_markup=kb,
+                )
+            except Exception as e:
+                log.warning("Could not post to group %s topic %s: %s", group_id, topic_id, e)
+
         dm_msg = None
         try:
             dm_msg = await self.bot.send_message(dm_chat_id, text, reply_markup=kb)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("Could not post to DM %s: %s", dm_chat_id, e)
 
         pair: Dict[str, Any] = {"dm": None, "topic": None}
         if dm_msg:
@@ -281,15 +313,16 @@ class TelegramStorage:
         if topic_msg:
             pair["topic"] = {"chat_id": topic_msg.chat.id, "message_id": topic_msg.message_id}
         day["pairs"].append(pair)
-        await self.save(state)
+        await self.save(user_id, state)
         return pair_index
 
-    async def sync_pair(self, date: str, pair_index: int) -> bool:
-        """Re-render and edit BOTH the DM and the topic checklist."""
-        state = await self.load()
+    async def sync_pair(self, user_id: int, date: str, pair_index: int) -> bool:
+        """Re-render and edit BOTH the DM and topic checklist for a user."""
+        state = await self.load(user_id)
         day = state["dates"][date]
-        text = render_text(date, day["tasks"])
-        kb = build_keyboard(date, pair_index, day["tasks"])
+        user_name = state.get("user_name") or "Student"
+        text = render_text(date, day["tasks"], user_id=user_id, user_name=user_name)
+        kb = build_keyboard(date, pair_index, day["tasks"], user_id=user_id)
         pair = day["pairs"][pair_index]
         jobs = []
         for side in ("dm", "topic"):
@@ -301,16 +334,16 @@ class TelegramStorage:
         results = await asyncio.gather(*jobs)
         return any(results) if results else False
 
-    async def toggle_task(self, date: str, pair_index: int, task_id: str) -> bool:
-        state = await self.load()
+    async def toggle_task(self, user_id: int, date: str, pair_index: int, task_id: str) -> bool:
+        state = await self.load(user_id)
         task = state["dates"][date]["tasks"][task_id]
         task["done"] = not task.get("done", False)
-        await self.save(state)
-        await self.sync_pair(date, pair_index)
+        await self.save(user_id, state)
+        await self.sync_pair(user_id, date, pair_index)
         return task["done"]
 
-    async def set_questions_solved(self, date: str, pair_index: int, task_id: str, solved: int) -> bool:
-        state = await self.load()
+    async def set_questions_solved(self, user_id: int, date: str, pair_index: int, task_id: str, solved: int) -> bool:
+        state = await self.load(user_id)
         task = state["dates"][date]["tasks"][task_id]
         total = task.get("total_q", 0)
         task["solved_q"] = min(solved, total)
@@ -318,53 +351,64 @@ class TelegramStorage:
             task["done"] = True
         else:
             task["done"] = False
-        await self.save(state)
-        await self.sync_pair(date, pair_index)
+        await self.save(user_id, state)
+        await self.sync_pair(user_id, date, pair_index)
         return task["done"]
 
-    async def set_score(self, date: str, pair_index: int, task_id: str, score: str) -> None:
-        state = await self.load()
+    async def set_score(self, user_id: int, date: str, pair_index: int, task_id: str, score: str) -> None:
+        state = await self.load(user_id)
         task = state["dates"][date]["tasks"][task_id]
         task["score"] = score
         task["done"] = True
-        await self.save(state)
-        await self.sync_pair(date, pair_index)
+        await self.save(user_id, state)
+        await self.sync_pair(user_id, date, pair_index)
 
-    async def delete_task(self, date: str, task_id: str, pair_index: int) -> bool:
+    async def finish_pair(self, user_id: int, date: str, pair_index: int) -> None:
+        """Mark pair as finished, removing keyboard from both messages."""
+        state = await self.load(user_id)
+        day = state["dates"][date]
+        user_name = state.get("user_name") or "Student"
+        text = render_text(date, day["tasks"], user_id=user_id, user_name=user_name, title="🏁 Day Finished!")
+        kb = build_keyboard(date, pair_index, day["tasks"], user_id=user_id, finished=True)
+        pair = day["pairs"][pair_index]
+        jobs = []
+        for side in ("dm", "topic"):
+            target = pair.get(side)
+            if target:
+                jobs.append(safe_edit_message(
+                    self.bot, target["chat_id"], target["message_id"], text, kb
+                ))
+        await asyncio.gather(*jobs)
+
+    async def delete_task(self, user_id: int, date: str, task_id: str, pair_index: int) -> bool:
         """Delete a single task and sync both messages."""
         try:
-            state = await self.load()
+            state = await self.load(user_id)
             if date not in state.get("dates", {}):
                 return False
-            
+
             day = state["dates"][date]
             if task_id not in day.get("tasks", {}):
                 return False
-            
-            # Remove the task
+
             del day["tasks"][task_id]
-            
-            # If no tasks left, remove the date
             if not day.get("tasks"):
                 del state["dates"][date]
-            
-            await self.save(state)
-            
-            # Sync the pair if date still exists
+
+            await self.save(user_id, state)
             if date in state.get("dates", {}):
-                await self.sync_pair(date, pair_index)
-            
+                await self.sync_pair(user_id, date, pair_index)
             return True
         except Exception:
             return False
 
-    async def delete_date(self, date: str) -> bool:
+    async def delete_date(self, user_id: int, date: str) -> bool:
         """Delete all targets for a specific date."""
         try:
-            state = await self.load()
+            state = await self.load(user_id)
             if date in state.get("dates", {}):
                 del state["dates"][date]
-                await self.save(state)
+                await self.save(user_id, state)
                 return True
             return False
         except Exception:
