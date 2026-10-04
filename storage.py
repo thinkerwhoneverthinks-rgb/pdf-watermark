@@ -229,12 +229,16 @@ class TelegramStorage:
         ids = []
         for spec in specs:
             task_id = new_task_id()
-            day["tasks"][task_id] = {
+            task_data = {
                 "label": spec["label"],
                 "kind": spec.get("kind", "task"),
                 "done": False,
                 "score": None,
             }
+            if spec.get("kind") == "questions":
+                task_data["total_q"] = spec.get("total_q", 0)
+                task_data["solved_q"] = spec.get("solved_q", 0)
+            day["tasks"][task_id] = task_data
             ids.append(task_id)
         await self.save(state)
         return ids

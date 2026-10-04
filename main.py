@@ -10,7 +10,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 import config
-from handlers import fsm_entry, sync_callbacks
+from handlers import fsm_entry, sync_callbacks, vision_entry
 from storage import TelegramStorage
 
 logging.basicConfig(level=logging.INFO)
@@ -50,7 +50,7 @@ async def main() -> None:
 
     dp = Dispatcher(storage=MemoryStorage())
     dp["storage"] = storage  # injected into every handler as a kwarg
-    dp.include_routers(sync_callbacks.router, fsm_entry.router)
+    dp.include_routers(sync_callbacks.router, fsm_entry.router, vision_entry.router)
 
     await asyncio.gather(
         dp.start_polling(bot),
