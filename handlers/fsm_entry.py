@@ -7,6 +7,7 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -17,6 +18,7 @@ from aiogram.types import (
 )
 
 import config
+from report_generator import generate_html_report
 from storage import TelegramStorage, render_text, today_str
 
 router = Router()
@@ -30,43 +32,80 @@ class TargetFSM(StatesGroup):
 
 
 # --------------------------------------------------------------------------- #
-#  Help / Start Command
+#  Help / Start Commands
 # --------------------------------------------------------------------------- #
-@router.message(Command("help"), F.chat.type == "private")
-async def cmd_help(m: Message):
-    help_text = (
-        "🤖 <b>Welcome to your Daily Target Bot!</b>\n\n"
-        "Here are the ways to use the bot:\n\n"
-        "<b>1️⃣ Web App UI (Recommended):</b>\n"
-        "Click the 'Open Web App' button below to visually stage and send multiple targets at once.\n\n"
-        "<b>2️⃣ Quick Syntax (/target or /q):</b>\n"
-        "Send: <code>/target phy L2 Q50 ncert Thermodynamics</code>\n\n"
-        "<b>3️⃣ Direct Text:</b>\n"
-        "Send your targets in plain text like:\n"
-        "<i>CHEM\nLECTURE - 2 lec\nQUESTION - DPP 5</i>\n\n"
-        "<b>4️⃣ Group Topic Sync (/set):</b>\n"
-        "Add me to your study group and send <code>/set</code> inside your specific topic! "
-        "Multiple students can send <code>/set</code> in the same topic to track targets together."
-    )
-
-    kb = None
-    if config.WEBAPP_URL:
-        kb = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Open Web App", web_app=WebAppInfo(url=config.WEBAPP_URL))]],
-            resize_keyboard=True
-        )
-    await m.answer(help_text, reply_markup=kb)
-
-
 @router.message(Command("start"), F.chat.type == "private")
 async def cmd_start(m: Message, storage: TelegramStorage):
-    # Initialize user state and save display name
+    # Save user display name into state
     user_id = m.from_user.id
     user_name = m.from_user.full_name
     state = await storage.load(user_id)
     state["user_name"] = user_name
     await storage.save(user_id, state)
-    await cmd_help(m)
+
+    welcome_text = (
+        f"👋 <b>Welcome {html.escape(m.from_user.first_name)}!</b>\n\n"
+        "Track your daily study targets, practice questions, and mock tests with real-time group sync.\n\n"
+        "Tap below to begin planning today's targets:"
+    )
+
+    kb = None
+    if config.WEBAPP_URL:
+        kb = ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="🚀 Open Web App", web_app=WebAppInfo(url=config.WEBAPP_URL))]],
+            resize_keyboard=True
+        )
+    await m.answer(welcome_text, reply_markup=kb)
+
+
+@router.message(Command("help"))
+async def cmd_help(m: Message):
+    from handlers.sync_callbacks import get_main_help_keyboard
+    help_text = (
+        "📖 <b>Daily Target Tracker — Help Center</b>\n\n"
+        "Tap a topic below to view instructions:"
+    )
+    await m.answer(help_text, reply_markup=get_main_help_keyboard())
+
+
+# --------------------------------------------------------------------------- #
+#  Export Standalone HTML Dashboard Report (/export, /report)
+# --------------------------------------------------------------------------- #
+@router.message(Command("export", "report"), F.chat.type == "private")
+async def cmd_export_report(m: Message, storage: TelegramStorage):
+    user_id = m.from_user.id
+    user_name = m.from_user.full_name
+    state = await storage.load(user_id)
+    dates_data = state.get("dates", {})
+
+    if not dates_data:
+        return await m.answer("ℹ️ No study history recorded yet! Add some targets first using the Web App or <code>/target</code>.")
+
+    wait_msg = await m.answer("⏳ Generating your interactive study report...")
+
+    try:
+        html_content = generate_html_report(user_id, user_name, dates_data)
+        html_bytes = html_content.encode("utf-8")
+
+        date_today = today_str()
+        safe_name = re.sub(r"[^\w\-]", "_", user_name).strip("_")
+        filename = f"Study_Report_{safe_name}_{date_today}.html"
+
+        doc = BufferedInputFile(html_bytes, filename=filename)
+
+        caption = (
+            f"📊 <b>Study Dashboard Report ({len(dates_data)} Days Recorded)</b>\n\n"
+            "✨ <b>Features:</b>\n"
+            "• 🌙 <b>Auto Dark / Light Theme</b> + manual switcher\n"
+            "• ⚡ <b>Clickable Subject Filter Tabs</b> (Physics, Chem, Bio, Tests)\n"
+            "• 📈 <b>Live Question Progress</b> & Chapter Breakdowns\n\n"
+            "<i>Open this HTML file in Chrome, Safari, or any browser on your phone or PC.</i>"
+        )
+
+        await m.answer_document(doc, caption=caption)
+        await wait_msg.delete()
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ Failed to generate report: {e}")
 
 
 # --------------------------------------------------------------------------- #

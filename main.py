@@ -45,13 +45,16 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="start", description="🚀 Open main menu & WebApp"),
         BotCommand(command="target", description="⚡ Quick targets (e.g. /target phy L2 Q50)"),
         BotCommand(command="q", description="⚡ Short alias for /target"),
+        BotCommand(command="summary", description="📊 View recent study progress & streak"),
+        BotCommand(command="export", description="📄 Download interactive HTML study dashboard"),
         BotCommand(command="set", description="ℹ️ View or configure your linked group topic"),
         BotCommand(command="delete", description="🗑️ Delete targets for today or a date"),
-        BotCommand(command="help", description="📖 Help guide and instructions"),
+        BotCommand(command="help", description="📖 Interactive help menu"),
     ]
     group_commands = [
         BotCommand(command="set", description="🔗 Link this topic for your daily targets"),
-        BotCommand(command="help", description="📖 Help guide and instructions"),
+        BotCommand(command="summary", description="📊 View study progress (reply to a friend)"),
+        BotCommand(command="help", description="📖 Interactive help menu"),
     ]
     try:
         await bot.set_my_commands(private_commands, scope=BotCommandScopeAllPrivateChats())

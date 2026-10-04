@@ -24,6 +24,13 @@ import config
 log = logging.getLogger("dtt-storage")
 MAX_EDIT_ATTEMPTS = 3
 
+PINNED_BANNER = (
+    "📌 <b>Daily Target Tracker Storage</b>\n"
+    "⚠️ <b>DO NOT DELETE OR UNPIN THIS MESSAGE!</b>\n"
+    "<i>This message securely stores your study streaks, targets, and test scores.</i>\n"
+    "───────────────────────────────────\n"
+)
+
 
 # --------------------------------------------------------------------------- #
 #  Small helpers
@@ -34,6 +41,15 @@ def new_task_id() -> str:
 
 def today_str() -> str:
     return datetime.date.today().isoformat()
+
+
+def is_date_locked(date_str: str) -> bool:
+    """Returns True if the target date is older than 48 hours (2 days)."""
+    try:
+        target = datetime.date.fromisoformat(date_str)
+        return (datetime.date.today() - target).days > 2
+    except Exception:
+        return False
 
 
 async def safe_edit_message(bot: Bot, chat_id: int, message_id: int,
@@ -64,7 +80,7 @@ async def safe_edit_message(bot: Bot, chat_id: int, message_id: int,
 #  Rendering
 # --------------------------------------------------------------------------- #
 def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], user_id: int, finished: bool = False) -> InlineKeyboardMarkup:
-    if finished:
+    if finished or is_date_locked(date):
         return InlineKeyboardMarkup(inline_keyboard=[])
 
     rows = []
@@ -95,16 +111,17 @@ def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], user_id: 
 
 def render_text(date: str, tasks: Dict[str, dict], user_id: Optional[int] = None, user_name: Optional[str] = None, title: Optional[str] = None) -> str:
     done = sum(1 for t in tasks.values() if t.get("done"))
+    locked_tag = " [🔒 Locked]" if is_date_locked(date) else ""
 
     if title:
-        header = f"<b>{title}</b> • <code>{date}</code>"
+        header = f"<b>{title}</b> • <code>{date}</code>{locked_tag}"
     elif user_id and user_name:
         escaped_name = html.escape(user_name)
-        header = f"🎯 <a href=\"tg://user?id={user_id}\">{escaped_name}</a>'s Targets • <code>{date}</code>"
+        header = f"🎯 <a href=\"tg://user?id={user_id}\">{escaped_name}</a>'s Targets • <code>{date}</code>{locked_tag}"
     elif user_name:
-        header = f"🎯 <b>{html.escape(user_name)}'s Targets</b> • <code>{date}</code>"
+        header = f"🎯 <b>{html.escape(user_name)}'s Targets</b> • <code>{date}</code>{locked_tag}"
     else:
-        header = f"🎯 <b>Daily Targets</b> • <code>{date}</code>"
+        header = f"🎯 <b>Daily Targets</b> • <code>{date}</code>{locked_tag}"
 
     lines = [header, ""]
     for task in tasks.values():
@@ -153,9 +170,10 @@ class TelegramStorage:
         try:
             chat = await self.bot.get_chat(user_id)
             pinned = chat.pinned_message
-            if pinned and pinned.text and pinned.text.startswith(config.STATE_MARKER):
+            if pinned and pinned.text and config.STATE_MARKER in pinned.text:
                 self._user_msg_ids[user_id] = pinned.message_id
-                return pinned.text
+                idx = pinned.text.find(config.STATE_MARKER)
+                return pinned.text[idx:]
         except Exception as exc:
             log.debug("No pinned state for user %s: %s", user_id, exc)
         return None
@@ -188,15 +206,15 @@ class TelegramStorage:
             self._user_caches[user_id] = state
             payload = self._serialize(state)
             msg_id = self._user_msg_ids.get(user_id)
+            full_text = PINNED_BANNER + config.STATE_MARKER + payload
 
             ok = False
             if msg_id:
                 ok = await safe_edit_message(
-                    self.bot, user_id, msg_id,
-                    config.STATE_MARKER + payload,
+                    self.bot, user_id, msg_id, full_text
                 )
             if not ok:
-                await self._recreate_state_message(user_id, payload)
+                await self._recreate_state_message(user_id, full_text)
 
     def _serialize(self, state: Dict[str, Any]) -> str:
         self._prune(state)
@@ -220,7 +238,8 @@ class TelegramStorage:
 
     @staticmethod
     def _prune(state: Dict[str, Any]) -> None:
-        cutoff = datetime.date.today() - datetime.timedelta(days=config.STATE_RETENTION_DAYS)
+        # Retention window set to 30 days
+        cutoff = datetime.date.today() - datetime.timedelta(days=30)
         for day in list(state.get("dates", {})):
             try:
                 if datetime.date.fromisoformat(day) < cutoff:
@@ -228,20 +247,26 @@ class TelegramStorage:
             except ValueError:
                 pass
 
-    async def _recreate_state_message(self, user_id: int, payload: str) -> None:
-        sent = await self.bot.send_message(
-            user_id, config.STATE_MARKER + payload,
-        )
+    async def _recreate_state_message(self, user_id: int, full_text: str) -> None:
         try:
-            await self.bot.pin_chat_message(
-                user_id, sent.message_id, disable_notification=True
+            sent = await self.bot.send_message(
+                user_id, full_text,
             )
-        except Exception:
-            pass
-        self._user_msg_ids[user_id] = sent.message_id
+            try:
+                await self.bot.pin_chat_message(
+                    user_id, sent.message_id, disable_notification=True
+                )
+            except Exception:
+                pass
+            self._user_msg_ids[user_id] = sent.message_id
+        except Exception as e:
+            log.error("Failed to create state message for user %s: %s", user_id, e)
 
     # -- domain operations -------------------------------------------------- #
     async def add_tasks(self, user_id: int, date: str, specs: List[dict]) -> List[str]:
+        if is_date_locked(date):
+            raise ValueError(f"Targets for {date} are locked (> 48h old).")
+
         state = await self.load(user_id)
         day = state.setdefault("dates", {}).setdefault(
             date, {"pairs": [], "tasks": {}}
@@ -334,7 +359,10 @@ class TelegramStorage:
         results = await asyncio.gather(*jobs)
         return any(results) if results else False
 
-    async def toggle_task(self, user_id: int, date: str, pair_index: int, task_id: str) -> bool:
+    async def toggle_task(self, user_id: int, date: str, pair_index: int, task_id: str) -> Optional[bool]:
+        if is_date_locked(date):
+            return None  # Locked
+
         state = await self.load(user_id)
         task = state["dates"][date]["tasks"][task_id]
         task["done"] = not task.get("done", False)
@@ -342,7 +370,10 @@ class TelegramStorage:
         await self.sync_pair(user_id, date, pair_index)
         return task["done"]
 
-    async def set_questions_solved(self, user_id: int, date: str, pair_index: int, task_id: str, solved: int) -> bool:
+    async def set_questions_solved(self, user_id: int, date: str, pair_index: int, task_id: str, solved: int) -> Optional[bool]:
+        if is_date_locked(date):
+            return None  # Locked
+
         state = await self.load(user_id)
         task = state["dates"][date]["tasks"][task_id]
         total = task.get("total_q", 0)
@@ -355,13 +386,17 @@ class TelegramStorage:
         await self.sync_pair(user_id, date, pair_index)
         return task["done"]
 
-    async def set_score(self, user_id: int, date: str, pair_index: int, task_id: str, score: str) -> None:
+    async def set_score(self, user_id: int, date: str, pair_index: int, task_id: str, score: str) -> bool:
+        if is_date_locked(date):
+            return False  # Locked
+
         state = await self.load(user_id)
         task = state["dates"][date]["tasks"][task_id]
         task["score"] = score
         task["done"] = True
         await self.save(user_id, state)
         await self.sync_pair(user_id, date, pair_index)
+        return True
 
     async def finish_pair(self, user_id: int, date: str, pair_index: int) -> None:
         """Mark pair as finished, removing keyboard from both messages."""
@@ -382,6 +417,9 @@ class TelegramStorage:
 
     async def delete_task(self, user_id: int, date: str, task_id: str, pair_index: int) -> bool:
         """Delete a single task and sync both messages."""
+        if is_date_locked(date):
+            return False
+
         try:
             state = await self.load(user_id)
             if date not in state.get("dates", {}):
@@ -404,6 +442,9 @@ class TelegramStorage:
 
     async def delete_date(self, user_id: int, date: str) -> bool:
         """Delete all targets for a specific date."""
+        if is_date_locked(date):
+            return False
+
         try:
             state = await self.load(user_id)
             if date in state.get("dates", {}):
