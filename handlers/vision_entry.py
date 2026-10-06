@@ -102,6 +102,10 @@ async def handle_text_targets(m: Message, storage: TelegramStorage):
         lines = lines[1:]
     elif "day 1" in first_line_lower: # just as fallback
         lines = lines[1:]
+    else:
+        # Ignore random date header lines if they don't seem like subject/target
+        if len(first_line_lower) < 30 and ("targets" in first_line_lower or "plan" in first_line_lower or re.search(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b", first_line_lower)):
+            lines = lines[1:]
 
     for line in lines:
         line = line.strip()

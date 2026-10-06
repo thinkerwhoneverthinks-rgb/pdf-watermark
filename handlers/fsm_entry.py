@@ -13,6 +13,7 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
+    KeyboardButton,
     WebAppInfo,
 )
 
@@ -32,33 +33,38 @@ class TargetFSM(StatesGroup):
 # --------------------------------------------------------------------------- #
 #  Help Command
 # --------------------------------------------------------------------------- #
-@router.message(Command("help"), F.chat.type == "private")
+@router.message(Command("help"))
 async def cmd_help(m: Message):
     help_text = (
         "🤖 <b>Welcome to your Daily Target Bot!</b>\n\n"
         "Here are 3 ways to add your targets:\n\n"
         "<b>1️⃣ Web App UI (Recommended):</b>\n"
         "Click the 'Open Web App' button below to use the easy interface.\n\n"
-        "<b>2️⃣ Quick Syntax (/target):</b>\n"
+        "<b>2️⃣ FSM Interface (/new):</b>\n"
+        "Send <code>/new</code> to add targets step-by-step with buttons.\n\n"
+        "<b>3️⃣ Quick Syntax (/target):</b>\n"
         "Send a message like: <code>/target phy L2 Q50 ncert Thermodynamics</code>\n\n"
-        "<b>3️⃣ Direct Text:</b>\n"
+        "<b>4️⃣ Direct Text:</b>\n"
         "Just send your targets in plain text like:\n"
         "<i>CHEM\nLECTURE - 2 lec\nQUESTION - DPP 5</i>\n"
     )
 
-    if m.chat.type == "private":
-        kb = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="Open Web App", web_app=WebAppInfo(url=config.WEBAPP_URL))]],
-            resize_keyboard=True
-        )
-        await m.answer(help_text, reply_markup=kb)
+    if m.chat.type == "private" and config.WEBAPP_URL and config.WEBAPP_URL.startswith("http"):
+        try:
+            kb = ReplyKeyboardMarkup(
+                keyboard=[[KeyboardButton(text="Open Web App", web_app=WebAppInfo(url=config.WEBAPP_URL))]],
+                resize_keyboard=True
+            )
+            await m.answer(help_text, reply_markup=kb)
+        except Exception:
+            await m.answer(help_text)
     else:
         await m.answer(help_text)
 
+@router.message(Command("start"))
 async def cmd_start(m: Message):
     await cmd_help(m)
 
-    wait_msg = await m.answer("⏳ Generating your interactive study report...")
 
 # --------------------------------------------------------------------------- #
 #  Method 1: Web App Data Handler
@@ -94,9 +100,134 @@ async def handle_webapp_data(m: Message, storage: TelegramStorage):
     except Exception as e:
         await m.answer(f"❌ Failed to process WebApp data: {e}")
 
+        date_offset = 0
+        all_specs = []
+        for data in data_list:
+            if "__date_offset" in data:
+                date_offset = data["__date_offset"]
+                continue
 
 # --------------------------------------------------------------------------- #
-#  Method 2: Quick Syntax Parsing (/target)
+#  Method 2: FSM Interface (/new)
+# --------------------------------------------------------------------------- #
+@router.message(Command("new"), F.chat.type == "private")
+async def cmd_new(m: Message, state: FSMContext):
+    await state.set_state(TargetFSM.subject)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Physics", callback_data="tsubj|Physics"),
+         InlineKeyboardButton(text="Chemistry", callback_data="tsubj|Chemistry")],
+        [InlineKeyboardButton(text="Biology", callback_data="tsubj|Biology"),
+         InlineKeyboardButton(text="Test", callback_data="tsubj|Test")]
+    ])
+    await m.answer("Step 1: Choose a Subject", reply_markup=kb)
+
+            all_specs.extend(_build_specs_from_task(subject, task_type, count, details, chapter))
+
+@router.callback_query(TargetFSM.subject, F.data.startswith("tsubj|"))
+async def target_pick_subject(cb: CallbackQuery, state: FSMContext):
+    subject = cb.data.split("|")[1]
+    await state.update_data(subject=subject)
+    await state.set_state(TargetFSM.task)
+    await cb.answer()
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Lecture", callback_data="ttask|Lecture"),
+         InlineKeyboardButton(text="Questions", callback_data="ttask|Questions")],
+        [InlineKeyboardButton(text="Revision", callback_data="ttask|Revision"),
+         InlineKeyboardButton(text="Short Notes", callback_data="ttask|Short Notes")],
+        [InlineKeyboardButton(text="NCERT", callback_data="ttask|NCERT"),
+         InlineKeyboardButton(text="Custom", callback_data="ttask|Custom")],
+        [InlineKeyboardButton(text="✅ Done", callback_data="ttask|Done")]
+    ])
+    await cb.message.answer(f"Subject: <b>{subject}</b>\nStep 2: Choose a Task", reply_markup=kb)
+
+
+@router.callback_query(TargetFSM.task, F.data.startswith("ttask|"))
+async def target_pick_task(cb: CallbackQuery, state: FSMContext, storage: TelegramStorage):
+    task = cb.data.split("|")[1]
+    await cb.answer()
+
+    if task == "Done":
+        date = today_str()
+        await state.clear()
+        # Generate the interactive checklist
+        await storage.publish_pair(date, cb.message.chat.id)
+        return
+
+    await state.update_data(task_type=task)
+
+    if task in ["Lecture", "Questions"]:
+        await state.set_state(TargetFSM.count)
+        await cb.message.answer(f"How many {task}?")
+    elif task == "Custom":
+        await state.set_state(TargetFSM.custom_task)
+        await cb.message.answer("Type your custom task details:")
+    else:
+        # Save standard task instantly and return to task selection
+        data = await state.get_data()
+        specs = _build_specs_from_task(data["subject"], task, 1, "")
+        await storage.add_tasks(today_str(), specs)
+
+        # Go back to task selection
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Lecture", callback_data="ttask|Lecture"),
+             InlineKeyboardButton(text="Questions", callback_data="ttask|Questions")],
+            [InlineKeyboardButton(text="Revision", callback_data="ttask|Revision"),
+             InlineKeyboardButton(text="Short Notes", callback_data="ttask|Short Notes")],
+            [InlineKeyboardButton(text="NCERT", callback_data="ttask|NCERT"),
+             InlineKeyboardButton(text="Custom", callback_data="ttask|Custom")],
+            [InlineKeyboardButton(text="✅ Done", callback_data="ttask|Done")]
+        ])
+        await cb.message.answer(f"Added {task}!\nAdd another task or click Done:", reply_markup=kb)
+
+
+@router.message(TargetFSM.count, F.text)
+async def target_task_count(m: Message, state: FSMContext, storage: TelegramStorage):
+    try:
+        count = int(m.text.strip())
+        if count <= 0:
+            raise ValueError
+    except ValueError:
+        return await m.answer("Please send a valid number.")
+
+    data = await state.get_data()
+    specs = _build_specs_from_task(data["subject"], data["task_type"], count, "")
+    await storage.add_tasks(today_str(), specs)
+
+    await state.set_state(TargetFSM.task)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Lecture", callback_data="ttask|Lecture"),
+         InlineKeyboardButton(text="Questions", callback_data="ttask|Questions")],
+        [InlineKeyboardButton(text="Revision", callback_data="ttask|Revision"),
+         InlineKeyboardButton(text="Short Notes", callback_data="ttask|Short Notes")],
+        [InlineKeyboardButton(text="NCERT", callback_data="ttask|NCERT"),
+         InlineKeyboardButton(text="Custom", callback_data="ttask|Custom")],
+        [InlineKeyboardButton(text="✅ Done", callback_data="ttask|Done")]
+    ])
+    await m.answer(f"Added {count} {data['task_type']}!\nAdd another task or click Done:", reply_markup=kb)
+
+
+@router.message(TargetFSM.custom_task, F.text)
+async def target_custom_task(m: Message, state: FSMContext, storage: TelegramStorage):
+    data = await state.get_data()
+    specs = _build_specs_from_task(data["subject"], "Custom", 1, m.text.strip())
+    await storage.add_tasks(today_str(), specs)
+
+    await state.set_state(TargetFSM.task)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Lecture", callback_data="ttask|Lecture"),
+         InlineKeyboardButton(text="Questions", callback_data="ttask|Questions")],
+        [InlineKeyboardButton(text="Revision", callback_data="ttask|Revision"),
+         InlineKeyboardButton(text="Short Notes", callback_data="ttask|Short Notes")],
+        [InlineKeyboardButton(text="NCERT", callback_data="ttask|NCERT"),
+         InlineKeyboardButton(text="Custom", callback_data="ttask|Custom")],
+        [InlineKeyboardButton(text="✅ Done", callback_data="ttask|Done")]
+    ])
+    await m.answer(f"Added custom task!\nAdd another task or click Done:", reply_markup=kb)
+
+
+# --------------------------------------------------------------------------- #
+#  Method 3: Quick Syntax Parsing (/target)
 # --------------------------------------------------------------------------- #
 @router.message(Command("target"), F.chat.type == "private")
 async def cmd_target(m: Message, storage: TelegramStorage):

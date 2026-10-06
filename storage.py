@@ -46,15 +46,6 @@ def get_relative_date_str(days_ahead: int) -> str:
     return (datetime.date.today() + datetime.timedelta(days=days_ahead)).isoformat()
 
 
-def is_date_locked(date_str: str) -> bool:
-    """Returns True if the target date is older than 48 hours (2 days)."""
-    try:
-        target = datetime.date.fromisoformat(date_str)
-        return (datetime.date.today() - target).days > 2
-    except Exception:
-        return False
-
-
 async def safe_edit_message(bot: Bot, chat_id: int, message_id: int,
                             text: str, reply_markup=None) -> bool:
     """Edit a message, gracefully riding out Telegram rate limits."""
@@ -99,6 +90,12 @@ def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], finished:
             solved = task.get("solved_q", 0)
             mark = "✅" if task.get("done") else "⬜"
             label, cb = f"{mark} {task['label']} ({solved}/{total})", f"qs|{user_id}|{date}|{pair_index}|{task_id}"
+            rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
+        elif task.get("kind") == "questions":
+            total = task.get("total_q", 0)
+            solved = task.get("solved_q", 0)
+            mark = "✅" if task.get("done") else "❌"
+            label, cb = f"{mark} {task['label']} ({solved}/{total})", f"qs|{date}|{pair_index}|{task_id}"
             rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
         elif task.get("kind") == "questions":
             total = task.get("total_q", 0)
@@ -168,24 +165,36 @@ class TelegramStorage:
         return self._user_locks[user_id]
 
     async def init(self) -> None:
-        """Lifecycle initialization (optional pre-load for admin if defined)."""
-        if config.STATE_CHAT_ID:
+        raw = await self._read_raw()
+        if raw is None:
+            prefix = "📌 Daily Target Tracker Storage ⚠️ DO NOT DELETE OR UNPIN THIS MESSAGE\n\n"
+            sent = await self.bot.send_message(
+                self.chat_id, prefix + config.STATE_MARKER + "{}",
+                message_thread_id=self.thread_id,
+            )
             try:
                 await self.load(config.STATE_CHAT_ID)
             except Exception:
                 pass
+            self._state_msg_id = sent.message_id
+            raw = config.STATE_MARKER + "{}"
+        self._cache = self._parse(raw)
 
-    # -- raw read / write per user ------------------------------------------- #
-    async def _read_raw(self, user_id: int) -> Optional[str]:
-        try:
-            chat = await self.bot.get_chat(user_id)
-            pinned = chat.pinned_message
-            if pinned and pinned.text and config.STATE_MARKER in pinned.text:
-                self._user_msg_ids[user_id] = pinned.message_id
-                idx = pinned.text.find(config.STATE_MARKER)
-                return pinned.text[idx:]
-        except Exception as exc:
-            log.debug("No pinned state for user %s: %s", user_id, exc)
+    async def _read_raw(self) -> Optional[str]:
+        chat = await self.bot.get_chat(self.chat_id)
+        pinned = getattr(chat, "pinned_message", None)
+
+        # Aiogram 3 Message objects might not have `text` directly if it's not a text message,
+        # but in our case it should be. However, the logic here requires the bot to fetch the chat
+        # and get the pinned message. Let's make sure we handle cases where state isn't found gracefully.
+        if pinned and pinned.text and config.STATE_MARKER in pinned.text:
+            self._state_msg_id = pinned.message_id
+            # Extract from the marker onwards in case of prepended warnings
+            marker_idx = pinned.text.find(config.STATE_MARKER)
+            return pinned.text[marker_idx:]
+
+        # If no pinned message or doesn't match marker, try to search recent messages in the chat
+        # In this simple bot, we'll just return None to recreate it, which is safer.
         return None
 
     @staticmethod
@@ -215,16 +224,16 @@ class TelegramStorage:
         async with lock:
             self._user_caches[user_id] = state
             payload = self._serialize(state)
-            msg_id = self._user_msg_ids.get(user_id)
-            full_text = PINNED_BANNER + config.STATE_MARKER + payload
+            if self._state_msg_id is None:
+                await self.init()
 
-            ok = False
-            if msg_id:
-                ok = await safe_edit_message(
-                    self.bot, user_id, msg_id, full_text
-                )
-            if not ok:
-                await self._recreate_state_message(user_id, full_text)
+            prefix = "📌 Daily Target Tracker Storage ⚠️ DO NOT DELETE OR UNPIN THIS MESSAGE\n\n"
+            ok = await safe_edit_message(
+                self.bot, self.chat_id, self._state_msg_id,
+                prefix + config.STATE_MARKER + payload,
+            )
+            if not ok:  # message lost (deleted/unpinned) -> recreate
+                await self._recreate_state_message(payload)
 
     def _serialize(self, state: Dict[str, Any]) -> str:
         self._prune(state)
@@ -258,7 +267,12 @@ class TelegramStorage:
             except ValueError:
                 pass
 
-    async def _recreate_state_message(self, user_id: int, full_text: str) -> None:
+    async def _recreate_state_message(self, payload: str) -> None:
+        prefix = "📌 Daily Target Tracker Storage ⚠️ DO NOT DELETE OR UNPIN THIS MESSAGE\n\n"
+        sent = await self.bot.send_message(
+            self.chat_id, prefix + config.STATE_MARKER + payload,
+            message_thread_id=self.thread_id,
+        )
         try:
             sent = await self.bot.send_message(
                 user_id, full_text,
@@ -352,9 +366,9 @@ class TelegramStorage:
         """Re-render and edit BOTH the DM and topic checklist for a user."""
         state = await self.load(user_id)
         day = state["dates"][date]
-        user_name = state.get("user_name") or "Student"
-        text = render_text(date, day["tasks"], user_id=user_id, user_name=user_name)
-        kb = build_keyboard(date, pair_index, day["tasks"], user_id=user_id)
+        text = render_text(date, day["tasks"])
+        finished = day.get("finished", False)
+        kb = build_keyboard(date, pair_index, day["tasks"], finished=finished)
         pair = day["pairs"][pair_index]
         jobs = []
         for side in ("dm", "topic"):
@@ -375,6 +389,19 @@ class TelegramStorage:
         task["done"] = not task.get("done", False)
         await self.save(user_id, state)
         await self.sync_pair(user_id, date, pair_index)
+        return task["done"]
+
+    async def set_questions_solved(self, date: str, pair_index: int, task_id: str, solved: int) -> bool:
+        state = await self.load()
+        task = state["dates"][date]["tasks"][task_id]
+        total = task.get("total_q", 0)
+        task["solved_q"] = min(solved, total)
+        if task["solved_q"] >= total:
+            task["done"] = True
+        else:
+            task["done"] = False
+        await self.save(state)
+        await self.sync_pair(date, pair_index)
         return task["done"]
 
     async def set_questions_solved(self, date: str, pair_index: int, task_id: str, solved: int) -> bool:
