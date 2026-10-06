@@ -1,134 +1,66 @@
-# 📋 Daily Target Tracker Telegram Bot
+# 📋 Daily Target Tracker Bot
 
-A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, and a **Telegram Mini App (WebApp)** interface that tracks daily study targets with **zero external database**. Supports multiple users and group study rooms simultaneously by persisting each user's state inside their own private pinned Telegram message.
+A production-ready Telegram bot (aiogram 3.x + Google Gemini) that tracks daily
+study targets with **zero external database** — all state lives inside a pinned
+Telegram message, so it survives Render free-tier sleeps and redeploys.
 
----
+## Features
 
-## ✨ Features
+- **Guided `/new` flow** (aiogram FSM): subject → chapter → task type →
+  dynamic lecture splitting → optional note → dual dispatch.
+- **Handwritten target recognition**: send a photo, Gemini Vision extracts
+  structured JSON targets and splits `count > 1` items into numbered buttons.
+- **Dual-sync mirroring**: the checklist is posted to your DM *and* the group
+  topic; tapping a button in either place updates both instantly
+  (rate-limit-safe via `TelegramRetryAfter` handling).
+- **Test scores**: `[📝 Enter Score]` → type `610/720` in DM → both messages
+  update to `[✅ Scored: 610/720]` and a celebration is posted to the topic.
+- **Render-ready**: lightweight `aiohttp` server on `$PORT` with `GET /`
+  and `GET /health` returning 200.
 
-### 1️⃣ Three Flexible Ways to Add Targets
+## Architecture
 
-* **📱 Telegram Mini App (WebApp UI) [Recommended]**
-  * Sleek interactive UI matching your Telegram client's theme.
-  * **Subject Selection**: Physics, Chemistry, Biology, Test, or custom subject names.
-  * **Chapter / Topic Name**: Tag targets with specific chapters (e.g., *Thermodynamics*, *Rotational Motion*).
-  * **Task Types**:
-    * **Lecture**: Automatically splits counts into individual numbered tasks (`Lecture 1 (Thermodynamics)`, `Lecture 2 (Thermodynamics)`).
-    * **Questions**: Sets target question count with dynamic fraction tracking (`(0/81)`).
-    * **Revision / Short Notes / NCERT**: Direct one-click topic additions.
-    * **Custom**: Add custom tasks with custom descriptions.
-  * **Multi-Target Staging**: Add multiple tasks to a pending list and submit them all simultaneously with **"🚀 Send All Targets"**.
+```
+config.py               environment configuration
+storage.py              Telegram-as-a-database (pinned JSON state message)
+handlers/fsm_entry.py   guided step-by-step /new flow (FSM)
+handlers/vision_entry.py photo -> Gemini Vision -> structured targets
+handlers/sync_callbacks.py toggles + dual-sync edits + score entry
+main.py                 bot + health server, run concurrently via asyncio
+```
 
-* **⚡ Quick Syntax (`/target` or `/q`)**
-  * Superfast target creation using short commands.
-  * **Example:**
-    ```text
-    /target phy L2 Q50 ncert Thermodynamics
-    ```
-    *Generates:*
-    - Lecture 1 (Thermodynamics)
-    - Lecture 2 (Thermodynamics)
-    - Questions (Thermodynamics) (0/50)
-    - NCERT (Thermodynamics)
-  * Supports `/target` or `/q` aliases.
+State message: the bot pins a message starting with `DTT_STATE_V1::` in the
+state chat (default: the admin's DM). **Do not delete or unpin it.**
 
-* **📝 Direct Multiline Plain Text**
-  * Send unformatted or structured study targets directly into the chat:
-    ```text
-    CHEM
-    LECTURE - 2 lec
-    QUESTION - DPP 5
-    ```
+## Local setup
 
----
+```bash
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-### 2️⃣ Multi-User & Group Study Topics (`/set`)
+export BOT_TOKEN="123:abc"           # from @BotFather
+export BOT_OWNER_ID="123456789"      # your Telegram user id (state store host)
+export GROUP_CHAT_ID="-100xxxxxxxxxx"
+export TOPIC_ID="12345"              # forum topic id
+export GEMINI_API_KEY="AIza..."      # https://aistudio.google.com
+python main.py
+```
 
-* **One-Click Topic Linking (`/set`)**:
-  * Any user can link their daily targets to any group or forum topic by adding the bot to the group and sending `/set` inside their preferred topic.
-  * **Shared Topic Support**: 3–10+ study buddies can run `/set` in the **same group topic**. Each student gets their own clean, separate checklist message in that topic.
-* **Clean Clickable Name Headers**:
-  * Instead of long text with `@usernames`, checklist headers display a clean clickable link to the user's profile:
-    > 🎯 **<a href="#">Alice</a>'s Targets • `2026-10-04`**
-  * Works perfectly even if users do not have a Telegram `@username` configured.
-* **Click Authorization (Anti-Trolling)**:
-  * Only the owner of the checklist can tap its buttons. If another group member taps a button on someone else's checklist, the bot displays a friendly alert:
-    > *"⚠️ This is not your checklist! You can only mark your own targets."*
-* **Group Motivation & Celebrations 🔥**:
-  * When a user clicks **`🏁 Finish Day`**, the bot posts a celebration shoutout in the linked topic:
-    > *"🎉 **Alice** just completed today's study targets (5/5 • 100%)! 🔥"*
-  * When a user inputs test scores via `[📝 Enter Score]`, the bot announces the achievement in the topic:
-    > *"🎊 **Alice** scored **650/720** on their test! 🚀"*
+## Deploy on Render (Free Web Service)
 
----
+1. Push this folder to a GitHub repo.
+2. Render Dashboard → **New → Web Service** → connect the repo.
+3. Configure:
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python main.py`
+   - **Instance type**: Free
+4. Add the environment variables listed above (Render injects `PORT` itself).
+5. Deploy. Render's health checks hit `GET /` on `$PORT`; the bot polls
+   Telegram concurrently in the same process.
 
-### 3️⃣ Interactive Checklist & Real-Time Dual Sync
-
-* **Dual-Sync Mirroring**: Checklist is published to both the user's private DM and their linked group topic. Tapping a task in either location updates both messages instantly.
-* **In-Place Updates**: Adding more targets later in the day automatically updates today's existing checklist messages without creating duplicate spam in the group topic.
-* **Question Tracking**: Incremental or absolute question logging (e.g. `50` sets `50/81`, while `+10` adds 10 more).
-* **Test Score Recording**: Tap `[📝 Enter Score]` to input exam/mock test results (e.g., `620/720`) with instant synchronization.
-* **🔒 48-Hour Lock Rule**: Targets older than 48 hours are permanently locked and cannot be retroactively modified, keeping past records authentic and compacting storage.
-
----
-
-### 4️⃣ Peer Summary & Progress Reports (`/summary`)
-
-* **In Groups:** Reply to any friend's message with `/summary` to view their 5-day study streak, question totals, and completion percentage!
-* **In Private DM:** Type `/summary` to see your own recent study metrics card.
-
----
-
-### 5️⃣ Standalone Interactive HTML Report (`/export`)
-
-* Type `/export` in DM to receive a **self-contained `.html` file** of your 30-day study history.
-* **Features:**
-  * 🌙 **Auto Dark / Light Theme** (adapts to browser/device mode + manual ☀️/🌙 toggle).
-  * ⚡ **Sticky Subject Filter Pills**: Tap *Physics*, *Chemistry*, *Biology*, or *Tests* to instantly filter your view without page reloads or back buttons.
-  * 📊 **Dynamic KPI Stat Cards**: Automatically recalculates metrics for the active subject filter.
-  * 📂 **Detailed Chapter Breakdowns**: Displays full task lists, question progress bars (`50/81`), and test score badges.
-  * 📴 **100% Offline**: Zero external CSS, fonts, or CDNs required. Opens in any browser on iPhone, Android, or PC.
-  * 🖨️ **Print to PDF**: Press `Ctrl + P` to export a clean A4 study report.
-
----
-
-### 6️⃣ Telegram-as-a-Database (Zero External DB)
-
-* **No Postgres/MySQL/Redis needed**: Each user's persistent state is serialized as JSON and stored inside a pinned state message in their private DM with the bot.
-* **Safety Banner**: The pinned message includes a clear warning banner:
-  ```text
-  📌 Daily Target Tracker Storage
-  ⚠️ DO NOT DELETE OR UNPIN THIS MESSAGE!
-  This message securely stores your study streaks, targets, and test scores.
-  ```
-* **Unlimited Scalability**: Because each user gets their own pinned message, there is zero database contention and no shared message character limit.
-
----
-
-### 7️⃣ Render & Cloud Ready
-
-* Built-in lightweight `aiohttp` server listening on `$PORT`.
-* Health endpoints: `GET /` and `GET /health` returning `200 OK` for continuous uptime monitoring on Render, Railway, or Fly.io.
-
----
-
-## 📌 Usage Commands Summary
-
-| Command / Input | Scope | Description |
-| :--- | :---: | :--- |
-| `/start` | Private DM | Clean welcome message & launch button for WebApp |
-| `/help` | Both | Interactive button-based help center |
-| `/target <syntax>` | Private DM | Quick command parsing (e.g. `/target phy L2 Q50 ncert`) |
-| `/q <syntax>` | Private DM | Alias for `/target` |
-| `/summary` | Both | Shows 5-day study progress (reply to a friend in groups) |
-| `/export` | Private DM | Generates and sends your standalone interactive HTML dashboard |
-| `/set` | Group / Topic | Links the specific group forum topic to your account |
-| `/set` | Private DM | Displays current linked topic status and instructions |
-| `/delete` | Private DM | Deletes today's targets or targets for a specified date |
-| Direct Multiline Text | Private DM | Parses raw subject and study target blocks |
-| WebApp Button | Private DM | Opens visual builder for multi-target entry |
-
----
-
-## 📄 License
-This project is open-source under the [MIT License](LICENSE).
+> **Notes**
+> - Free-tier services sleep after inactivity; when Render wakes the bot it
+>   re-reads the pinned state message, so nothing is lost.
+> - If the state chat is a group, make the bot an admin so it can pin.
+> - The bot prunes target dates older than 14 days automatically to stay
+>   within Telegram's 4096-char message limit.

@@ -24,9 +24,11 @@ TOPIC_THREAD_ID: int = int(os.getenv("TOPIC_THREAD_ID", "0"))
 WEBAPP_URL: str = os.getenv("WEBAPP_URL", "")
 
 # --- Telegram-as-a-database ---
-# Admin Telegram user id (optional)
+# Chat that hosts the pinned JSON state message. Defaults to the admin DM.
 BOT_OWNER_ID: int = int(os.getenv("BOT_OWNER_ID", "0"))
 STATE_CHAT_ID: int = int(os.getenv("STATE_CHAT_ID", str(BOT_OWNER_ID)))
+if STATE_CHAT_ID == 0:
+    raise RuntimeError("Set BOT_OWNER_ID (admin Telegram user id) or STATE_CHAT_ID")
 STATE_TOPIC_ID: int = int(os.getenv("STATE_TOPIC_ID", "0"))
 STATE_MARKER: str = "DTT_STATE_V1::"
 STATE_MAX_LEN: int = 3900  # Telegram message limit is 4096; keep headroom
