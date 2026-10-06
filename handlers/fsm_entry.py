@@ -1,4 +1,3 @@
-import html
 import json
 import re
 
@@ -17,9 +16,8 @@ from aiogram.types import (
     WebAppInfo,
 )
 
+from storage import TelegramStorage, render_text, today_str, get_relative_date_str
 import config
-from report_generator import generate_html_report
-from storage import TelegramStorage, render_text, today_str
 
 router = Router()
 
@@ -32,137 +30,35 @@ class TargetFSM(StatesGroup):
 
 
 # --------------------------------------------------------------------------- #
-#  Help / Start Commands
+#  Help Command
 # --------------------------------------------------------------------------- #
-@router.message(Command("start"), F.chat.type == "private")
-async def cmd_start(m: Message, storage: TelegramStorage):
-    # Save user display name into state
-    user_id = m.from_user.id
-    user_name = m.from_user.full_name
-    state = await storage.load(user_id)
-    state["user_name"] = user_name
-    await storage.save(user_id, state)
-
-    welcome_text = (
-        f"👋 <b>Welcome {html.escape(m.from_user.first_name)}!</b>\n\n"
-        "Track your daily study targets, practice questions, and mock tests with real-time group sync.\n\n"
-        "Tap below to begin planning today's targets:"
+@router.message(Command("help"), F.chat.type == "private")
+async def cmd_help(m: Message):
+    help_text = (
+        "🤖 <b>Welcome to your Daily Target Bot!</b>\n\n"
+        "Here are 3 ways to add your targets:\n\n"
+        "<b>1️⃣ Web App UI (Recommended):</b>\n"
+        "Click the 'Open Web App' button below to use the easy interface.\n\n"
+        "<b>2️⃣ Quick Syntax (/target):</b>\n"
+        "Send a message like: <code>/target phy L2 Q50 ncert Thermodynamics</code>\n\n"
+        "<b>3️⃣ Direct Text:</b>\n"
+        "Just send your targets in plain text like:\n"
+        "<i>CHEM\nLECTURE - 2 lec\nQUESTION - DPP 5</i>\n"
     )
 
-    kb = None
-    if config.WEBAPP_URL:
+    if m.chat.type == "private":
         kb = ReplyKeyboardMarkup(
-            keyboard=[[KeyboardButton(text="🚀 Open Web App", web_app=WebAppInfo(url=config.WEBAPP_URL))]],
+            keyboard=[[KeyboardButton(text="Open Web App", web_app=WebAppInfo(url=config.WEBAPP_URL))]],
             resize_keyboard=True
         )
-    await m.answer(welcome_text, reply_markup=kb)
+        await m.answer(help_text, reply_markup=kb)
+    else:
+        await m.answer(help_text)
 
-
-@router.message(Command("help"))
-async def cmd_help(m: Message):
-    from handlers.sync_callbacks import get_main_help_keyboard
-    help_text = (
-        "📖 <b>Daily Target Tracker — Help Center</b>\n\n"
-        "Tap a topic below to view instructions:"
-    )
-    await m.answer(help_text, reply_markup=get_main_help_keyboard())
-
-
-# --------------------------------------------------------------------------- #
-#  Export Standalone HTML Dashboard Report (/export, /report)
-# --------------------------------------------------------------------------- #
-@router.message(Command("export", "report"), F.chat.type == "private")
-async def cmd_export_report(m: Message, storage: TelegramStorage):
-    user_id = m.from_user.id
-    user_name = m.from_user.full_name
-    state = await storage.load(user_id)
-    dates_data = state.get("dates", {})
-
-    if not dates_data:
-        return await m.answer("ℹ️ No study history recorded yet! Add some targets first using the Web App or <code>/target</code>.")
+async def cmd_start(m: Message):
+    await cmd_help(m)
 
     wait_msg = await m.answer("⏳ Generating your interactive study report...")
-
-    try:
-        html_content = generate_html_report(user_id, user_name, dates_data)
-        html_bytes = html_content.encode("utf-8")
-
-        date_today = today_str()
-        safe_name = re.sub(r"[^\w\-]", "_", user_name).strip("_")
-        filename = f"Study_Report_{safe_name}_{date_today}.html"
-
-        doc = BufferedInputFile(html_bytes, filename=filename)
-
-        caption = (
-            f"📊 <b>Study Dashboard Report ({len(dates_data)} Days Recorded)</b>\n\n"
-            "✨ <b>Features:</b>\n"
-            "• 🌙 <b>Auto Dark / Light Theme</b> + manual switcher\n"
-            "• ⚡ <b>Clickable Subject Filter Tabs</b> (Physics, Chem, Bio, Tests)\n"
-            "• 📈 <b>Live Question Progress</b> & Chapter Breakdowns\n\n"
-            "<i>Open this HTML file in Chrome, Safari, or any browser on your phone or PC.</i>"
-        )
-
-        await m.answer_document(doc, caption=caption)
-        await wait_msg.delete()
-    except Exception as e:
-        await wait_msg.edit_text(f"❌ Failed to generate report: {e}")
-
-
-# --------------------------------------------------------------------------- #
-#  Group / Topic Binding (/set)
-# --------------------------------------------------------------------------- #
-@router.message(Command("set"))
-async def cmd_set(m: Message, storage: TelegramStorage):
-    user_id = m.from_user.id
-    user_name = m.from_user.full_name
-    escaped_name = html.escape(user_name)
-    user_link = f"<a href=\"tg://user?id={user_id}\">{escaped_name}</a>"
-
-    if m.chat.type in ("group", "supergroup"):
-        group_id = m.chat.id
-        topic_id = m.message_thread_id or 0
-
-        # Load and update user's configuration
-        state = await storage.load(user_id)
-        state["user_name"] = user_name
-        state.setdefault("config", {})
-        state["config"]["group_chat_id"] = group_id
-        state["config"]["topic_thread_id"] = topic_id
-
-        try:
-            await storage.save(user_id, state)
-            topic_info = f" (Topic ID: <code>{topic_id}</code>)" if topic_id else ""
-            await m.reply(
-                f"✅ <b>Linked!</b> {user_link}'s daily targets will now automatically be posted to this topic{topic_info}."
-            )
-        except Exception:
-            bot_info = await m.bot.get_me()
-            await m.reply(
-                f"⚠️ {user_link}, please start me in private DM first (@{bot_info.username}) so I can initialize your checklist, then type <code>/set</code> here again!"
-            )
-    else:
-        # Ran inside private DM
-        state = await storage.load(user_id)
-        current_cfg = state.get("config", {})
-        gid = current_cfg.get("group_chat_id") or config.GROUP_CHAT_ID
-        tid = current_cfg.get("topic_thread_id") or config.TOPIC_THREAD_ID
-
-        if gid and tid:
-            status_text = f"📍 <b>Currently Linked Topic:</b> Group <code>{gid}</code>, Topic <code>#{tid}</code>\n\n"
-        elif gid:
-            status_text = f"📍 <b>Currently Linked Group:</b> Group <code>{gid}</code>\n\n"
-        else:
-            status_text = "📍 <b>Currently Linked Topic:</b> None (targets appear in DM only)\n\n"
-
-        await m.answer(
-            f"ℹ️ {status_text}"
-            "<b>How to link a group forum topic:</b>\n"
-            "1. Add this bot to your study group.\n"
-            "2. Open the specific forum topic where you want targets sent.\n"
-            "3. Send <code>/set</code> inside that topic!\n\n"
-            "Multiple group members can send <code>/set</code> in the same topic to track targets together."
-        )
-
 
 # --------------------------------------------------------------------------- #
 #  Method 1: Web App Data Handler
@@ -172,11 +68,16 @@ async def handle_webapp_data(m: Message, storage: TelegramStorage):
     try:
         data_list = json.loads(m.web_app_data.data)
         if isinstance(data_list, dict):
-            # Fallback for single-object webapp payloads
+            # Fallback for old cached webapp payloads
             data_list = [data_list]
 
+        date_offset = 0
         all_specs = []
         for data in data_list:
+            if "__date_offset" in data:
+                date_offset = data["__date_offset"]
+                continue
+
             subject = data.get("subject", "General")
             chapter = data.get("chapter", "")
             task_type = data.get("type", "Task")
@@ -185,26 +86,47 @@ async def handle_webapp_data(m: Message, storage: TelegramStorage):
 
             all_specs.extend(_build_specs_from_task(subject, task_type, count, details, chapter))
 
-        user_id = m.from_user.id
-        user_name = m.from_user.full_name
-        date = today_str()
-        await storage.add_tasks(user_id, date, all_specs)
-        await storage.publish_pair(user_id, date, m.chat.id, user_name=user_name)
+        date = get_relative_date_str(date_offset)
+        await storage.add_tasks(date, all_specs)
+        # Assuming publish_pair is updated to refresh the existing checklist for today
+        await storage.publish_pair(date, m.chat.id)
 
     except Exception as e:
         await m.answer(f"❌ Failed to process WebApp data: {e}")
 
 
 # --------------------------------------------------------------------------- #
-#  Method 2: Quick Syntax Parsing (/target or /q)
+#  Method 2: Quick Syntax Parsing (/target)
 # --------------------------------------------------------------------------- #
-@router.message(Command("target", "q"), F.chat.type == "private")
+@router.message(Command("target"), F.chat.type == "private")
 async def cmd_target(m: Message, storage: TelegramStorage):
-    text = re.sub(r"^/(target|q)\s*", "", m.text, flags=re.IGNORECASE).strip()
+    text = m.text.replace("/target", "", 1).strip()
     if not text:
-        return await m.answer("Usage: /target phy L2 Q50 ncert custom topic\n(or /q phy L2 Q50 ...)")
+        return await m.answer("Usage: /target [tomorrow] phy L2 Q50 [morning] ncert custom topic")
+
+    # Extract optional time tag at the end, e.g. [morning]
+    time_tag = ""
+    tag_match = re.search(r"[\[\(](.*?)[\]\)]$", text)
+    if tag_match:
+        time_tag = f" [{tag_match.group(1).strip()}]"
+        text = text[:tag_match.start()].strip()
 
     parts = text.split()
+    if not parts:
+        return await m.answer("Usage: /target [tomorrow] phy L2 Q50 [morning] ncert custom topic")
+
+    date_to_use = today_str()
+    # Check for date in the first word
+    if parts[0].lower() in ["tmrw", "tomorrow"]:
+        date_to_use = get_relative_date_str(1)
+        parts = parts[1:]
+    elif parts[0].lower() in ["today"]:
+        date_to_use = get_relative_date_str(0)
+        parts = parts[1:]
+
+    if not parts:
+        return await m.answer("No targets provided after date.")
+
     subject = "General"
 
     # Check first part for subject
@@ -222,8 +144,10 @@ async def cmd_target(m: Message, storage: TelegramStorage):
         subject = "Test"
         parts = parts[1:]
 
+    specs = []
     custom_parts = []
-    tasks_to_add = []  # list of (type, count)
+
+    tasks_to_add = [] # (type, count)
 
     for part in parts:
         if re.match(r"^L\d+$", part, re.IGNORECASE):
@@ -236,51 +160,42 @@ async def cmd_target(m: Message, storage: TelegramStorage):
         else:
             custom_parts.append(part)
 
-    chapter = " ".join(custom_parts) if custom_parts else ""
+    chapter = (" ".join(custom_parts) if custom_parts else "") + time_tag
 
-    specs = []
     for ttype, count in tasks_to_add:
-        specs.extend(_build_specs_from_task(subject, ttype, count, "", chapter))
-
-    # If only custom words were given without specific markers, treat whole thing as custom task
-    if not specs and custom_parts:
-        specs.extend(_build_specs_from_task(subject, "Custom", 1, chapter, chapter))
+        specs.extend(_build_specs_from_task(subject, ttype, count, "", chapter.strip()))
 
     if not specs:
-        return await m.answer("No valid targets found in quick syntax. Example: /target phy L2 Q50 ncert Thermodynamics")
+        return await m.answer("No valid targets found in quick syntax.")
 
-    user_id = m.from_user.id
-    user_name = m.from_user.full_name
-    date = today_str()
-    await storage.add_tasks(user_id, date, specs)
-    await storage.publish_pair(user_id, date, m.chat.id, user_name=user_name)
+    await storage.add_tasks(date_to_use, specs)
+    await storage.publish_pair(date_to_use, m.chat.id)
 
 
 def _build_specs_from_task(subject: str, task_type: str, count: int, details: str, chapter: str = "") -> list:
     specs = []
-    display_title = chapter or subject
     if task_type == "Lecture":
         for i in range(1, count + 1):
             specs.append({
-                "label": f"Lecture {i} ({display_title})",
+                "label": f"Lecture {i} ({chapter or subject})",
                 "kind": "task"
             })
     elif task_type == "Questions":
+        # Tracks fraction (0/50)
         specs.append({
-            "label": f"Questions ({display_title})",
+            "label": f"Questions ({chapter or subject})",
             "kind": "questions",
             "total_q": count,
             "solved_q": 0
         })
     elif task_type == "Custom":
-        label_text = details if details else display_title
         specs.append({
-            "label": f"{label_text} ({subject})" if details and subject != "General" else label_text,
+            "label": f"{details} ({chapter or subject})",
             "kind": "task"
         })
     else:
         specs.append({
-            "label": f"{task_type} ({display_title})",
+            "label": f"{task_type} ({chapter or subject})",
             "kind": "task"
         })
     return specs

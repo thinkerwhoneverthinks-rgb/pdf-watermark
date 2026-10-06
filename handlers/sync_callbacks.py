@@ -17,6 +17,9 @@ router = Router()
 class ScoreInput(StatesGroup):
     waiting = State()
 
+class QuestionInput(StatesGroup):
+    waiting = State()
+
 
 class QuestionInput(StatesGroup):
     waiting = State()
@@ -206,42 +209,26 @@ async def toggle(cb: CallbackQuery, storage: TelegramStorage):
 
 
 # --------------------------------------------------------------------------- #
-#  Question entry flow (dual-sync + authorization + 48h lock)
+#  Question entry flow
 # --------------------------------------------------------------------------- #
 @router.callback_query(F.data.startswith("qs|"))
 async def questions_prompt(cb: CallbackQuery, state: FSMContext, storage: TelegramStorage):
-    parts = cb.data.split("|")
-    owner_id = int(parts[1])
-    date = parts[2]
-    pair_index = int(parts[3])
-    task_id = parts[4]
+    _, date, pair_index, task_id = cb.data.split("|")
 
-    # Authorization check
-    if cb.from_user.id != owner_id:
-        return await cb.answer("⚠️ This is not your checklist! You can only log questions on your own targets.", show_alert=True)
-
-    # 48-Hour lock check
-    if is_date_locked(date):
-        return await cb.answer("🔒 Locked: Targets older than 48 hours are finalized and cannot be edited.", show_alert=True)
-
-    store_state = await storage.load(owner_id)
-    task = store_state.get("dates", {}).get(date, {}).get("tasks", {}).get(task_id, {})
+    # Check if already done
+    store_state = await storage.load()
+    task = store_state["dates"][date]["tasks"][task_id]
     if task.get("done"):
         return await cb.answer("Already completed! 🎉")
 
     await state.set_state(QuestionInput.waiting)
-    await state.update_data(owner_id=owner_id, date=date, pair_index=pair_index, task_id=task_id)
+    await state.update_data(date=date, pair_index=int(pair_index), task_id=task_id)
     await cb.answer()
-
-    total_q = task.get("total_q", 0)
-    current_q = task.get("solved_q", 0)
 
     try:
         await cb.bot.send_message(
             cb.from_user.id,
-            f"✍️ <b>Question Progress</b> (Target: {total_q})\n"
-            f"Currently solved: <b>{current_q} / {total_q}</b>\n\n"
-            "Send the total questions solved so far (e.g. <code>50</code>) or send <code>+10</code> to add more:",
+            f"✍️ How many more questions did you solve? (Total: {task.get('total_q')})",
         )
     except Exception:
         await cb.answer(
@@ -250,96 +237,75 @@ async def questions_prompt(cb: CallbackQuery, state: FSMContext, storage: Telegr
         )
 
 
-@router.message(QuestionInput.waiting, F.text.regexp(r"^\+?\d+$"))
+@router.message(QuestionInput.waiting, F.text.regexp(r"^\d+$"))
 async def questions_received(m: Message, state: FSMContext, storage: TelegramStorage):
-    raw_text = m.text.strip()
+    solved = int(m.text.strip())
     data = await state.get_data()
     await state.clear()
 
-    owner_id = data["owner_id"]
-    date = data["date"]
-    pair_index = data["pair_index"]
-    task_id = data["task_id"]
+    # Need to add to existing solved amount
+    store_state = await storage.load()
+    task = store_state["dates"][data["date"]]["tasks"][data["task_id"]]
+    new_solved = task.get("solved_q", 0) + solved
 
-    if is_date_locked(date):
-        return await m.answer("🔒 Locked: Targets older than 48 hours can no longer be edited.")
-
-    store_state = await storage.load(owner_id)
-    task = store_state.get("dates", {}).get(date, {}).get("tasks", {}).get(task_id, {})
-
-    if raw_text.startswith("+"):
-        # Incremental addition
-        delta = int(raw_text[1:])
-        new_solved = task.get("solved_q", 0) + delta
-    else:
-        # Absolute count
-        new_solved = int(raw_text)
-
-    done = await storage.set_questions_solved(owner_id, date, pair_index, task_id, new_solved)
+    done = await storage.set_questions_solved(data["date"], data["pair_index"], data["task_id"], new_solved)
     if done:
-        await m.answer("🎉 Target completed!")
+        await m.answer(f"🎉 Questions completed!")
     else:
-        await m.answer(f"📝 Progress recorded: {new_solved}/{task.get('total_q', 0)} questions")
+        await m.answer(f"📝 Progress recorded: {new_solved}/{task.get('total_q')} questions")
 
 
 @router.message(QuestionInput.waiting)
 async def questions_invalid(m: Message):
-    await m.answer("Please send a valid number (e.g. <code>50</code> or <code>+10</code>).")
+    await m.answer("Please send a valid number.")
 
 
 # --------------------------------------------------------------------------- #
-#  Finish Day (dual-sync + authorization + group celebration)
+#  Finish Day
 # --------------------------------------------------------------------------- #
 @router.callback_query(F.data.startswith("finish|"))
 async def finish_day(cb: CallbackQuery, storage: TelegramStorage):
-    parts = cb.data.split("|")
-    owner_id = int(parts[1])
-    date = parts[2]
-    pair_index = int(parts[3])
-
-    # Authorization check
-    if cb.from_user.id != owner_id:
-        return await cb.answer("⚠️ This is not your checklist! You can only finish your own day's targets.", show_alert=True)
-
+    _, date, pair_index = cb.data.split("|")
+    pair_index = int(pair_index)
     await cb.answer()
 
-    state = await storage.load(owner_id)
-    day = state.get("dates", {}).get(date)
-    if not day or not day.get("tasks"):
-        return await cb.answer("No targets found for today.")
-
+    # Disable keyboard in original message
+    state = await storage.load()
+    day = state["dates"][date]
     tasks = day["tasks"]
+
     total_tasks = len(tasks)
     done_tasks = sum(1 for t in tasks.values() if t.get("done"))
     percentage = int((done_tasks / total_tasks * 100)) if total_tasks > 0 else 0
 
-    # Disable buttons in both DM and topic
-    await storage.finish_pair(owner_id, date, pair_index)
+    # Post summary to group
+    from storage import render_text, build_keyboard
+    summary_text = render_text(date, tasks, title=f"🏁 {cb.from_user.first_name}'s Day Finished! ({percentage}%)")
 
-    user_name = state.get("user_name") or cb.from_user.full_name
-    escaped_name = html.escape(user_name)
-    user_link = f"<a href=\"tg://user?id={owner_id}\">{escaped_name}</a>"
+    if config.GROUP_CHAT_ID and config.TOPIC_THREAD_ID:
+        await cb.bot.send_message(
+            config.GROUP_CHAT_ID,
+            summary_text,
+            message_thread_id=config.TOPIC_THREAD_ID,
+        )
 
-    # Send celebration to user's linked topic if configured
-    cfg = state.get("config", {})
-    group_id = cfg.get("group_chat_id") or config.GROUP_CHAT_ID
-    topic_id = cfg.get("topic_thread_id") or config.TOPIC_THREAD_ID
+    # Re-render with finished=True to remove the inline keyboard
+    text = render_text(date, tasks)
+    kb = build_keyboard(date, pair_index, tasks, finished=True)
 
-    if group_id and topic_id:
-        try:
-            await cb.bot.send_message(
-                group_id,
-                f"🎉 {user_link} just completed today's study targets ({done_tasks}/{total_tasks} • {percentage}%)! 🔥",
-                message_thread_id=topic_id,
-            )
-        except Exception:
-            pass
+    pair = day["pairs"][pair_index]
+    target = pair.get("dm")
+    if target:
+        from storage import safe_edit_message
+        await safe_edit_message(
+            storage.bot, target["chat_id"], target["message_id"], text, kb
+        )
 
     await cb.message.answer(f"🏁 Day finished! You completed {done_tasks}/{total_tasks} ({percentage}%) targets.")
 
 
 # --------------------------------------------------------------------------- #
-#  Score entry flow (dual-sync + authorization)
+#  Score entry flow
 # --------------------------------------------------------------------------- #
 @router.callback_query(F.data.startswith("sc|"))
 async def score_prompt(cb: CallbackQuery, state: FSMContext):
@@ -389,25 +355,12 @@ async def score_received(m: Message, state: FSMContext, storage: TelegramStorage
 
     await storage.set_score(owner_id, date, pair_index, task_id, score)
     await m.answer(f"🎉 Score recorded: <b>{score}</b>")
-
-    state_data = await storage.load(owner_id)
-    user_name = state_data.get("user_name") or m.from_user.full_name
-    escaped_name = html.escape(user_name)
-    user_link = f"<a href=\"tg://user?id={owner_id}\">{escaped_name}</a>"
-
-    cfg = state_data.get("config", {})
-    group_id = cfg.get("group_chat_id") or config.GROUP_CHAT_ID
-    topic_id = cfg.get("topic_thread_id") or config.TOPIC_THREAD_ID
-
-    if group_id and topic_id:
-        try:
-            await m.bot.send_message(
-                group_id,
-                f"🎊 {user_link} scored <b>{score}</b> on their test! 🚀",
-                message_thread_id=topic_id,
-            )
-        except Exception:
-            pass
+    if config.GROUP_CHAT_ID and config.TOPIC_THREAD_ID:
+        await m.bot.send_message(
+            config.GROUP_CHAT_ID,
+            f"🎊 <b>{m.from_user.first_name}</b> scored <b>{score}</b> on today's test!",
+            message_thread_id=config.TOPIC_THREAD_ID,
+        )
 
 
 @router.message(ScoreInput.waiting)
@@ -418,7 +371,7 @@ async def score_invalid(m: Message):
 # --------------------------------------------------------------------------- #
 #  Deletion functionality (per-user)
 # --------------------------------------------------------------------------- #
-@router.message(Command("delete"), F.chat.type == "private")
+@router.message(Command("delete"))
 async def cmd_delete_date(m: Message, storage: TelegramStorage):
     """Delete all targets for a specific date from user's state."""
     from storage import today_str

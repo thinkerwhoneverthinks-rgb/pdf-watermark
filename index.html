@@ -109,6 +109,15 @@
     <h2>Add Target</h2>
 
     <div class="form-group">
+        <label>Date</label>
+        <select id="dateSelect">
+            <option value="0">Today</option>
+            <option value="1">Tomorrow</option>
+            <option value="2">Day after tomorrow</option>
+        </select>
+    </div>
+
+    <div class="form-group">
         <label>Subject</label>
         <select id="subject" onchange="handleSubjectChange()">
             <option value="Physics">Physics</option>
@@ -125,6 +134,11 @@
     <div class="form-group">
         <label>Chapter / Topic Name (Optional)</label>
         <input type="text" id="chapter" placeholder="e.g. Thermodynamics, Solutions, etc.">
+    </div>
+
+    <div class="form-group">
+        <label>Time Deadline (Optional)</label>
+        <input type="text" id="timeDeadline" placeholder="e.g. Morning, Till 6 PM, 1-6">
     </div>
 
     <div class="form-group">
@@ -230,6 +244,11 @@
             }
 
             let chapter = document.getElementById('chapter').value.trim();
+            let timeDeadline = document.getElementById('timeDeadline').value.trim();
+            if (timeDeadline) {
+                timeDeadline = "[" + timeDeadline + "]";
+                chapter = chapter ? chapter + " " + timeDeadline : timeDeadline;
+            }
 
             let taskObj = {
                 subject: subject,
@@ -275,8 +294,14 @@
                 tg.showAlert("Please add at least one task first.");
                 return;
             }
+
+            // We need to pass the date selector to the bot too.
+            // We can prepend a special date configuration object to the array.
+            let dateOffset = parseInt(document.getElementById('dateSelect').value) || 0;
+            let payload = [{ __date_offset: dateOffset }].concat(pendingTasks);
+
             // Send data array back to the bot
-            tg.sendData(JSON.stringify(pendingTasks));
+            tg.sendData(JSON.stringify(payload));
             tg.close();
         }
 

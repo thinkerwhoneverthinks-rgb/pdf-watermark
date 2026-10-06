@@ -2,7 +2,7 @@ import re
 from aiogram import Router, F
 from aiogram.types import Message
 
-from storage import TelegramStorage, today_str
+from storage import TelegramStorage, today_str, get_relative_date_str
 
 router = Router()
 
@@ -10,6 +10,20 @@ def _parse_task_line_strict(line: str, subject: str) -> dict | None:
     text = line.strip()
     if not text:
         return None
+
+    # Check for optional time tags e.g., [till 6], [morning], [1-6], (till 6)
+    time_tag = ""
+    tag_match = re.search(r"[\[\(](.*?)[\]\)]$", text)
+    if tag_match:
+        time_tag = f" [{tag_match.group(1).strip()}]"
+        text = text[:tag_match.start()].strip()
+    elif "," in text:
+        # Check if the text after comma looks like a time like "till 6"
+        parts = text.split(",")
+        last_part = parts[-1].strip().lower()
+        if "till" in last_part or "morning" in last_part or "evening" in last_part or "night" in last_part or re.match(r"^\d{1,2}-\d{1,2}$", last_part):
+            time_tag = f" [{parts[-1].strip()}]"
+            text = ",".join(parts[:-1]).strip()
 
     upper = text.upper()
 
@@ -46,7 +60,7 @@ def _parse_task_line_strict(line: str, subject: str) -> dict | None:
         matches = re.findall(r'\d+', line)
         count = sum([int(m) for m in matches]) if matches else 50 # dummy default
         return {
-            "label": f"{task_type} - {chapter}",
+            "label": f"{task_type} - {chapter}{time_tag}",
             "kind": "questions",
             "total_q": count,
             "solved_q": 0
@@ -57,13 +71,13 @@ def _parse_task_line_strict(line: str, subject: str) -> dict | None:
         specs = []
         for i in range(1, count + 1):
              specs.append({
-                 "label": f"{task_type} {i} - {chapter}",
+                 "label": f"{task_type} {i} - {chapter}{time_tag}",
                  "kind": "task"
              })
         return specs # Return a list of specs for lectures
     else:
         return {
-            "label": f"{task_type} - {chapter}",
+            "label": f"{task_type} - {chapter}{time_tag}",
             "kind": "task"
         }
 
@@ -75,6 +89,19 @@ async def handle_text_targets(m: Message, storage: TelegramStorage):
     lines = m.text.split("\n")
     specs = []
     current_subject = ""
+
+    # Check if the first line is a date specifier
+    date_to_use = today_str()
+    first_line_lower = lines[0].strip().lower()
+    if first_line_lower in ["today", "tmrw", "tomorrow", "day after tomorrow", "next 2 days"]:
+        if "after tomorrow" in first_line_lower:
+            date_to_use = get_relative_date_str(2)
+        elif "tmrw" in first_line_lower or "tomorrow" in first_line_lower:
+            date_to_use = get_relative_date_str(1)
+        # remove date line
+        lines = lines[1:]
+    elif "day 1" in first_line_lower: # just as fallback
+        lines = lines[1:]
 
     for line in lines:
         line = line.strip()
@@ -103,10 +130,7 @@ async def handle_text_targets(m: Message, storage: TelegramStorage):
                 specs.append(spec_or_specs)
 
     if specs:
-        date = today_str()
-        user_id = m.from_user.id
-        user_name = m.from_user.full_name
-        await storage.add_tasks(user_id, date, specs)
-        await storage.publish_pair(user_id, date, m.chat.id, user_name=user_name)
+        await storage.add_tasks(date_to_use, specs)
+        await storage.publish_pair(date_to_use, m.chat.id)
     else:
         await m.answer("I couldn't understand any targets from that text. Try using /q or the UI!")

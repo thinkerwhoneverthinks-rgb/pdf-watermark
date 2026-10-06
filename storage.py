@@ -42,6 +42,9 @@ def new_task_id() -> str:
 def today_str() -> str:
     return datetime.date.today().isoformat()
 
+def get_relative_date_str(days_ahead: int) -> str:
+    return (datetime.date.today() + datetime.timedelta(days=days_ahead)).isoformat()
+
 
 def is_date_locked(date_str: str) -> bool:
     """Returns True if the target date is older than 48 hours (2 days)."""
@@ -79,8 +82,8 @@ async def safe_edit_message(bot: Bot, chat_id: int, message_id: int,
 # --------------------------------------------------------------------------- #
 #  Rendering
 # --------------------------------------------------------------------------- #
-def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], user_id: int, finished: bool = False) -> InlineKeyboardMarkup:
-    if finished or is_date_locked(date):
+def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], finished: bool = False) -> InlineKeyboardMarkup:
+    if finished:
         return InlineKeyboardMarkup(inline_keyboard=[])
 
     rows = []
@@ -97,15 +100,22 @@ def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], user_id: 
             mark = "✅" if task.get("done") else "⬜"
             label, cb = f"{mark} {task['label']} ({solved}/{total})", f"qs|{user_id}|{date}|{pair_index}|{task_id}"
             rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
+        elif task.get("kind") == "questions":
+            total = task.get("total_q", 0)
+            solved = task.get("solved_q", 0)
+            mark = "✅" if task.get("done") else "❌"
+            label, cb = f"{mark} {task['label']} ({solved}/{total})", f"qs|{date}|{pair_index}|{task_id}"
+            rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
         else:
-            mark = "✅" if task.get("done") else "⬜"
-            label, cb = f"{mark} {task['label']}", f"tg|{user_id}|{date}|{pair_index}|{task_id}"
+            mark = "✅" if task.get("done") else "❌"
+            label, cb = f"{mark} {task['label']}", f"tg|{date}|{pair_index}|{task_id}"
+            
             rows.append([
                 InlineKeyboardButton(text=label[:64], callback_data=cb[:64])
             ])
 
     # Add Finish Day button
-    rows.append([InlineKeyboardButton(text="🏁 Finish Day", callback_data=f"finish|{user_id}|{date}|{pair_index}")])
+    rows.append([InlineKeyboardButton(text="🏁 Finish Day", callback_data=f"finish|{date}|{pair_index}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -224,11 +234,12 @@ class TelegramStorage:
             del state["dates"][oldest]
             payload = json.dumps(state, separators=(",", ":"), ensure_ascii=False)
 
-        # If still too large, prune old message pairs in remaining date
+        # If still too large and we only have 1 date left, try pruning old pairs
         if len(payload) > config.STATE_MAX_LEN and len(state.get("dates", {})) == 1:
             only_date = list(state["dates"].keys())[0]
             pairs = state["dates"][only_date].get("pairs", [])
             while len(payload) > config.STATE_MAX_LEN and len(pairs) > 1:
+                # remove the oldest pair to free up space
                 pairs.pop(0)
                 payload = json.dumps(state, separators=(",", ":"), ensure_ascii=False)
 
@@ -317,15 +328,11 @@ class TelegramStorage:
         kb = build_keyboard(date, pair_index, day["tasks"], user_id=user_id)
 
         topic_msg = None
-        if group_id and topic_id:
-            try:
-                topic_msg = await self.bot.send_message(
-                    group_id, text,
-                    message_thread_id=topic_id, reply_markup=kb,
-                )
-            except Exception as e:
-                log.warning("Could not post to group %s topic %s: %s", group_id, topic_id, e)
-
+        if config.GROUP_CHAT_ID and config.TOPIC_THREAD_ID:
+            topic_msg = await self.bot.send_message(
+                config.GROUP_CHAT_ID, text,
+                message_thread_id=config.TOPIC_THREAD_ID, reply_markup=kb,
+            )
         dm_msg = None
         try:
             dm_msg = await self.bot.send_message(dm_chat_id, text, reply_markup=kb)
@@ -370,11 +377,8 @@ class TelegramStorage:
         await self.sync_pair(user_id, date, pair_index)
         return task["done"]
 
-    async def set_questions_solved(self, user_id: int, date: str, pair_index: int, task_id: str, solved: int) -> Optional[bool]:
-        if is_date_locked(date):
-            return None  # Locked
-
-        state = await self.load(user_id)
+    async def set_questions_solved(self, date: str, pair_index: int, task_id: str, solved: int) -> bool:
+        state = await self.load()
         task = state["dates"][date]["tasks"][task_id]
         total = task.get("total_q", 0)
         task["solved_q"] = min(solved, total)
@@ -382,15 +386,12 @@ class TelegramStorage:
             task["done"] = True
         else:
             task["done"] = False
-        await self.save(user_id, state)
-        await self.sync_pair(user_id, date, pair_index)
+        await self.save(state)
+        await self.sync_pair(date, pair_index)
         return task["done"]
 
-    async def set_score(self, user_id: int, date: str, pair_index: int, task_id: str, score: str) -> bool:
-        if is_date_locked(date):
-            return False  # Locked
-
-        state = await self.load(user_id)
+    async def set_score(self, date: str, pair_index: int, task_id: str, score: str) -> None:
+        state = await self.load()
         task = state["dates"][date]["tasks"][task_id]
         task["score"] = score
         task["done"] = True
