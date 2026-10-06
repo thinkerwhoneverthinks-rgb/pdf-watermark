@@ -6,10 +6,14 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
 )
 
 from storage import TelegramStorage, render_text, today_str, get_relative_date_str
@@ -54,6 +58,7 @@ async def cmd_help(m: Message):
 async def cmd_start(m: Message):
     await cmd_help(m)
 
+    wait_msg = await m.answer("⏳ Generating your interactive study report...")
 
 # --------------------------------------------------------------------------- #
 #  Method 1: Web App Data Handler
