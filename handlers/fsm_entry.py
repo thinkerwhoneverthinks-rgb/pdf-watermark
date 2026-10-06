@@ -6,9 +6,11 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
+    BufferedInputFile,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
     KeyboardButton,
@@ -98,6 +100,12 @@ async def handle_webapp_data(m: Message, storage: TelegramStorage):
     except Exception as e:
         await m.answer(f"❌ Failed to process WebApp data: {e}")
 
+        date_offset = 0
+        all_specs = []
+        for data in data_list:
+            if "__date_offset" in data:
+                date_offset = data["__date_offset"]
+                continue
 
 # --------------------------------------------------------------------------- #
 #  Method 2: FSM Interface (/new)
@@ -113,6 +121,7 @@ async def cmd_new(m: Message, state: FSMContext):
     ])
     await m.answer("Step 1: Choose a Subject", reply_markup=kb)
 
+            all_specs.extend(_build_specs_from_task(subject, task_type, count, details, chapter))
 
 @router.callback_query(TargetFSM.subject, F.data.startswith("tsubj|"))
 async def target_pick_subject(cb: CallbackQuery, state: FSMContext):
