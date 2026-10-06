@@ -15,6 +15,9 @@ router = Router()
 class ScoreInput(StatesGroup):
     waiting = State()
 
+class QuestionInput(StatesGroup):
+    waiting = State()
+
 
 # --------------------------------------------------------------------------- #
 #  Toggling tasks (dual-sync)
@@ -32,6 +35,110 @@ async def toggle(cb: CallbackQuery, storage: TelegramStorage):
     if done:
         await cb.answer("Done! 💪")
     # (second answer is a no-op on clients; first answer already stopped the spinner)
+
+
+# --------------------------------------------------------------------------- #
+#  Question entry flow
+# --------------------------------------------------------------------------- #
+@router.callback_query(F.data.startswith("qs|"))
+async def questions_prompt(cb: CallbackQuery, state: FSMContext, storage: TelegramStorage):
+    _, date, pair_index, task_id = cb.data.split("|")
+
+    # Check if already done
+    store_state = await storage.load()
+    task = store_state["dates"][date]["tasks"][task_id]
+    if task.get("done"):
+        return await cb.answer("Already completed! 🎉")
+
+    await state.set_state(QuestionInput.waiting)
+    await state.update_data(date=date, pair_index=int(pair_index), task_id=task_id)
+    await cb.answer()
+
+    try:
+        await cb.bot.send_message(
+            cb.from_user.id,
+            f"✍️ How many more questions did you solve? (Total: {task.get('total_q')})",
+        )
+    except Exception:
+        await cb.answer(
+            "Open a DM with me first, then tap the button again.",
+            show_alert=True,
+        )
+
+
+@router.message(QuestionInput.waiting, F.text.regexp(r"^\d+$"))
+async def questions_received(m: Message, state: FSMContext, storage: TelegramStorage):
+    solved = int(m.text.strip())
+    data = await state.get_data()
+    await state.clear()
+
+    # Need to add to existing solved amount
+    store_state = await storage.load()
+    task = store_state["dates"][data["date"]]["tasks"][data["task_id"]]
+    new_solved = task.get("solved_q", 0) + solved
+
+    done = await storage.set_questions_solved(data["date"], data["pair_index"], data["task_id"], new_solved)
+    if done:
+        await m.answer(f"🎉 Questions completed!")
+    else:
+        await m.answer(f"📝 Progress recorded: {new_solved}/{task.get('total_q')} questions")
+
+
+@router.message(QuestionInput.waiting)
+async def questions_invalid(m: Message):
+    await m.answer("Please send a valid number.")
+
+
+# --------------------------------------------------------------------------- #
+#  Finish Day
+# --------------------------------------------------------------------------- #
+@router.callback_query(F.data.startswith("finish|"))
+async def finish_day(cb: CallbackQuery, storage: TelegramStorage):
+    _, date, pair_index = cb.data.split("|")
+    pair_index = int(pair_index)
+    await cb.answer()
+
+    # Disable keyboard in original message
+    state = await storage.load()
+    day = state["dates"][date]
+    tasks = day["tasks"]
+
+    total_tasks = len(tasks)
+    done_tasks = sum(1 for t in tasks.values() if t.get("done"))
+    percentage = int((done_tasks / total_tasks * 100)) if total_tasks > 0 else 0
+
+    # Save state to finish
+    day["finished"] = True
+    await storage.save(state)
+
+    # Post summary to group
+    from storage import render_text, build_keyboard
+    summary_text = render_text(date, tasks, title=f"🏁 {cb.from_user.first_name}'s Day Finished! ({percentage}%)")
+
+    if config.GROUP_CHAT_ID and config.TOPIC_THREAD_ID:
+        await cb.bot.send_message(
+            config.GROUP_CHAT_ID,
+            summary_text,
+            message_thread_id=config.TOPIC_THREAD_ID,
+        )
+
+    # Re-render with finished=True to remove the inline keyboard from both
+    text = render_text(date, tasks)
+    kb = build_keyboard(date, pair_index, tasks, finished=True)
+
+    pair = day["pairs"][pair_index]
+    from storage import safe_edit_message
+    import asyncio
+    jobs = []
+    for side in ("dm", "topic"):
+        target = pair.get(side)
+        if target:
+            jobs.append(safe_edit_message(
+                storage.bot, target["chat_id"], target["message_id"], text, kb
+            ))
+    await asyncio.gather(*jobs)
+
+    await cb.message.answer(f"🏁 Day finished! You completed {done_tasks}/{total_tasks} ({percentage}%) targets.")
 
 
 # --------------------------------------------------------------------------- #
@@ -62,11 +169,11 @@ async def score_received(m: Message, state: FSMContext, storage: TelegramStorage
     await state.clear()
     await storage.set_score(data["date"], data["pair_index"], data["task_id"], score)
     await m.answer(f"🎉 Score recorded: <b>{score}</b>")
-    if config.GROUP_CHAT_ID and config.TOPIC_ID:
+    if config.GROUP_CHAT_ID and config.TOPIC_THREAD_ID:
         await m.bot.send_message(
             config.GROUP_CHAT_ID,
             f"🎊 <b>{m.from_user.first_name}</b> scored <b>{score}</b> on today's test!",
-            message_thread_id=config.TOPIC_ID,
+            message_thread_id=config.TOPIC_THREAD_ID,
         )
 
 
@@ -78,21 +185,6 @@ async def score_invalid(m: Message):
 # --------------------------------------------------------------------------- #
 #  Deletion functionality
 # --------------------------------------------------------------------------- #
-@router.callback_query(F.data.startswith("deltask|"))
-async def delete_single_task(cb: CallbackQuery, storage: TelegramStorage):
-    """Delete a single task from the checklist."""
-    _, date, pair_index, task_id = cb.data.split("|")
-    pair_index = int(pair_index)
-    
-    await cb.answer()
-    success = await storage.delete_task(date, task_id, pair_index)
-    
-    if success:
-        await cb.answer("🗑️ Task deleted!")
-    else:
-        await cb.answer("❌ Failed to delete task")
-
-
 @router.message(Command("delete"))
 async def cmd_delete_date(m: Message, storage: TelegramStorage):
     """Delete all targets for a specific date.
