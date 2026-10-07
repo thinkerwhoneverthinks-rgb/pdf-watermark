@@ -43,6 +43,7 @@ def generate_html_report(user_id: int, user_name: str, dates_data: Dict[str, Any
             kind = task.get("kind", "task")
             done = bool(task.get("done", False))
             score = task.get("score")
+            time_slot = task.get("time_slot", "")
             t_q = task.get("total_q", 0)
             s_q = task.get("solved_q", 0)
 
@@ -89,6 +90,7 @@ def generate_html_report(user_id: int, user_name: str, dates_data: Dict[str, Any
                 "score": score,
                 "total_q": t_q,
                 "solved_q": s_q,
+                "time_slot": time_slot,
                 "subject": subject,
                 "chapter": chapter,
             })
@@ -138,6 +140,7 @@ def generate_html_report(user_id: int, user_name: str, dates_data: Dict[str, Any
                 extra_tag = f'<span class="score-badge">🏆 Scored: {html.escape(t["score"])}</span>'
 
             chapter_tag = f'<span class="chapter-tag">{html.escape(t["chapter"])}</span>' if t["chapter"] else ""
+            time_tag = f'<span class="time-slot-badge">⏰ {html.escape(t["time_slot"])}</span>' if t.get("time_slot") else ""
             subj_badge = f'<span class="subject-badge badge-{subj.lower()}">{subj}</span>'
 
             tasks_html.append(f'''
@@ -146,6 +149,7 @@ def generate_html_report(user_id: int, user_name: str, dates_data: Dict[str, Any
                     <span class="status-icon">{done_mark}</span>
                     <span class="task-title">{html.escape(t["label"])}</span>
                     {chapter_tag}
+                    {time_tag}
                 </div>
                 <div class="task-right">
                     {extra_tag}
@@ -498,6 +502,16 @@ def generate_html_report(user_id: int, user_name: str, dates_data: Dict[str, Any
             padding: 2px 6px;
             border-radius: 4px;
             font-weight: 500;
+        }}
+
+        .time-slot-badge {{
+            font-size: 11px;
+            background: rgba(245, 158, 11, 0.12);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+            color: var(--warning);
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-weight: 600;
         }}
 
         .task-right {{

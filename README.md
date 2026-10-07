@@ -10,8 +10,10 @@ A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, an
 
 * **📱 Telegram Mini App (WebApp UI) [Recommended]**
   * Sleek interactive UI matching your Telegram client's theme.
+  * **Target Date Selection**: Choose **Today**, **Tomorrow**, or **Custom Date** picker.
   * **Subject Selection**: Physics, Chemistry, Biology, Test, or custom subject names.
   * **Chapter / Topic Name**: Tag targets with specific chapters (e.g., *Thermodynamics*, *Rotational Motion*).
+  * **Time Slot Presets & Custom Tags**: Set study windows (Morning, Afternoon, Evening, Night, or custom e.g., `1-6 PM`, `till 6`) per task.
   * **Task Types**:
     * **Lecture**: Automatically splits counts into individual numbered tasks (`Lecture 1 (Thermodynamics)`, `Lecture 2 (Thermodynamics)`).
     * **Questions**: Sets target question count with dynamic fraction tracking (`(0/81)`).
@@ -20,24 +22,26 @@ A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, an
   * **Multi-Target Staging**: Add multiple tasks to a pending list and submit them all simultaneously with **"🚀 Send All Targets"**.
 
 * **⚡ Quick Syntax (`/target` or `/q`)**
-  * Superfast target creation using short commands.
-  * **Example:**
+  * Superfast target creation using short commands with optional date prefix and time slot tags.
+  * **Examples:**
     ```text
     /target phy L2 Q50 ncert Thermodynamics
+    /target tomorrow phy L2 @morning Q50 @till-6 Thermodynamics
     ```
     *Generates:*
-    - Lecture 1 (Thermodynamics)
-    - Lecture 2 (Thermodynamics)
-    - Questions (Thermodynamics) (0/50)
+    - Lecture 1 (Thermodynamics) ⏰ *morning*
+    - Lecture 2 (Thermodynamics) ⏰ *morning*
+    - Questions (Thermodynamics) (0/50) ⏰ *till 6*
     - NCERT (Thermodynamics)
   * Supports `/target` or `/q` aliases.
 
 * **📝 Direct Multiline Plain Text**
-  * Send unformatted or structured study targets directly into the chat:
+  * Send unformatted or structured study targets directly into the chat (with optional `tomorrow` date header and `@time` tags):
     ```text
+    tomorrow
     CHEM
-    LECTURE - 2 lec
-    QUESTION - DPP 5
+    LECTURE - 2 lec @morning
+    QUESTION - DPP 5 @till-6
     ```
 
 ---

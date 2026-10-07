@@ -43,6 +43,10 @@ def today_str() -> str:
     return datetime.date.today().isoformat()
 
 
+def tomorrow_str() -> str:
+    return (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+
+
 def is_date_locked(date_str: str) -> bool:
     """Returns True if the target date is older than 48 hours (2 days)."""
     try:
@@ -85,21 +89,23 @@ def build_keyboard(date: str, pair_index: int, tasks: Dict[str, dict], user_id: 
 
     rows = []
     for task_id, task in tasks.items():
+        time_hint = f" [{task['time_slot']}]" if task.get("time_slot") else ""
+
         if task.get("kind") == "score":
             if task.get("score"):
                 label, cb = f"✅ Scored: {task['score']}", "noop"
             else:
-                label, cb = "📝 Enter Score", f"sc|{user_id}|{date}|{pair_index}|{task_id}"
+                label, cb = f"📝 Enter Score{time_hint}", f"sc|{user_id}|{date}|{pair_index}|{task_id}"
             rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
         elif task.get("kind") == "questions":
             total = task.get("total_q", 0)
             solved = task.get("solved_q", 0)
             mark = "✅" if task.get("done") else "⬜"
-            label, cb = f"{mark} {task['label']} ({solved}/{total})", f"qs|{user_id}|{date}|{pair_index}|{task_id}"
+            label, cb = f"{mark} {task['label']} ({solved}/{total}){time_hint}", f"qs|{user_id}|{date}|{pair_index}|{task_id}"
             rows.append([InlineKeyboardButton(text=label[:64], callback_data=cb[:64])])
         else:
             mark = "✅" if task.get("done") else "⬜"
-            label, cb = f"{mark} {task['label']}", f"tg|{user_id}|{date}|{pair_index}|{task_id}"
+            label, cb = f"{mark} {task['label']}{time_hint}", f"tg|{user_id}|{date}|{pair_index}|{task_id}"
             rows.append([
                 InlineKeyboardButton(text=label[:64], callback_data=cb[:64])
             ])
@@ -113,29 +119,36 @@ def render_text(date: str, tasks: Dict[str, dict], user_id: Optional[int] = None
     done = sum(1 for t in tasks.values() if t.get("done"))
     locked_tag = " [🔒 Locked]" if is_date_locked(date) else ""
 
+    date_label = f"<code>{date}</code>"
+    if date == tomorrow_str():
+        date_label += " <i>(Tomorrow)</i>"
+
     if title:
-        header = f"<b>{title}</b> • <code>{date}</code>{locked_tag}"
+        header = f"<b>{title}</b> • {date_label}{locked_tag}"
     elif user_id and user_name:
         escaped_name = html.escape(user_name)
-        header = f"🎯 <a href=\"tg://user?id={user_id}\">{escaped_name}</a>'s Targets • <code>{date}</code>{locked_tag}"
+        header = f"🎯 <a href=\"tg://user?id={user_id}\">{escaped_name}</a>'s Targets • {date_label}{locked_tag}"
     elif user_name:
-        header = f"🎯 <b>{html.escape(user_name)}'s Targets</b> • <code>{date}</code>{locked_tag}"
+        header = f"🎯 <b>{html.escape(user_name)}'s Targets</b> • {date_label}{locked_tag}"
     else:
-        header = f"🎯 <b>Daily Targets</b> • <code>{date}</code>{locked_tag}"
+        header = f"🎯 <b>Daily Targets</b> • {date_label}{locked_tag}"
 
     lines = [header, ""]
     for task in tasks.values():
+        time_tag = f" ⏰ <i>{task['time_slot']}</i>" if task.get("time_slot") else ""
+
         if task.get("kind") == "score":
             status = f"🏆 {task['score']}" if task.get("score") else "📝 awaiting score"
+            lines.append(f"{status} {task['label']}{time_tag}")
         elif task.get("kind") == "questions":
             total = task.get("total_q", 0)
             solved = task.get("solved_q", 0)
             status = "✅" if task.get("done") else "⬜"
-            lines.append(f"{status} {task['label']} ({solved}/{total})")
-            continue
+            lines.append(f"{status} {task['label']} ({solved}/{total}){time_tag}")
         else:
             status = "✅" if task.get("done") else "⬜"
-        lines.append(f"{status} {task['label']}")
+            lines.append(f"{status} {task['label']}{time_tag}")
+
     lines += ["", f"Progress: <b>{done}/{len(tasks)}</b> complete"]
     return "\n".join(lines)
 
@@ -158,7 +171,7 @@ class TelegramStorage:
         return self._user_locks[user_id]
 
     async def init(self) -> None:
-        """Lifecycle initialization (optional pre-load for admin if defined)."""
+        """Lifecycle initialization."""
         if config.STATE_CHAT_ID:
             try:
                 await self.load(config.STATE_CHAT_ID)
@@ -279,6 +292,7 @@ class TelegramStorage:
                 "kind": spec.get("kind", "task"),
                 "done": False,
                 "score": None,
+                "time_slot": spec.get("time_slot", ""),
             }
             if spec.get("kind") == "questions":
                 task_data["total_q"] = spec.get("total_q", 0)
@@ -300,13 +314,13 @@ class TelegramStorage:
         group_id = cfg.get("group_chat_id") or config.GROUP_CHAT_ID
         topic_id = cfg.get("topic_thread_id") or config.TOPIC_THREAD_ID
 
-        # If an active message pair already exists for today, update it in place
+        # If an active message pair already exists for this date, update it in place
         if day.get("pairs"):
             pair_index = len(day["pairs"]) - 1
             updated = await self.sync_pair(user_id, date, pair_index)
             if updated:
                 try:
-                    await self.bot.send_message(dm_chat_id, "✅ Today's checklist updated!")
+                    await self.bot.send_message(dm_chat_id, f"✅ Targets updated for <code>{date}</code>!")
                 except Exception:
                     pass
                 return pair_index

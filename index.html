@@ -2,32 +2,34 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Daily Targets</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Add Daily Target</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
             --bg-color: var(--tg-theme-bg-color, #ffffff);
-            --text-color: var(--tg-theme-text-color, #000000);
-            --hint-color: var(--tg-theme-hint-color, #999999);
-            --link-color: var(--tg-theme-link-color, #2481cc);
+            --text-color: var(--tg-theme-text-color, #222222);
             --button-color: var(--tg-theme-button-color, #2481cc);
             --button-text-color: var(--tg-theme-button-text-color, #ffffff);
-            --secondary-bg-color: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            --secondary-bg-color: var(--tg-theme-secondary-bg-color, #f0f2f5);
+            --hint-color: var(--tg-theme-hint-color, #999999);
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             background-color: var(--bg-color);
             color: var(--text-color);
             margin: 0;
             padding: 16px;
-            box-sizing: border-box;
+            user-select: none;
+            -webkit-user-select: none;
         }
 
         h2 {
             margin-top: 0;
+            margin-bottom: 20px;
             font-size: 20px;
+            text-align: center;
         }
 
         .form-group {
@@ -37,16 +39,17 @@
         label {
             display: block;
             margin-bottom: 8px;
+            font-size: 14px;
             font-weight: 500;
             color: var(--hint-color);
         }
 
-        select, input[type="text"], input[type="number"] {
+        select, input[type="text"], input[type="number"], input[type="date"] {
             width: 100%;
             padding: 12px;
-            border: 1px solid var(--hint-color);
             border-radius: 8px;
-            background-color: var(--bg-color);
+            border: 1px solid var(--secondary-bg-color);
+            background-color: var(--secondary-bg-color);
             color: var(--text-color);
             font-size: 16px;
             box-sizing: border-box;
@@ -57,6 +60,35 @@
         select:focus, input:focus {
             outline: none;
             border-color: var(--button-color);
+        }
+
+        .pill-grid {
+            display: flex;
+            gap: 8px;
+            overflow-x: auto;
+            scrollbar-width: none;
+            padding-bottom: 4px;
+        }
+        .pill-grid::-webkit-scrollbar {
+            display: none;
+        }
+
+        .pill-btn {
+            background-color: var(--secondary-bg-color);
+            color: var(--text-color);
+            border: 1px solid transparent;
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .pill-btn.selected {
+            background-color: var(--button-color);
+            color: var(--button-text-color);
+            font-weight: 600;
         }
 
         .task-grid {
@@ -80,6 +112,7 @@
         .task-btn.selected {
             background-color: var(--button-color);
             color: var(--button-text-color);
+            font-weight: 600;
         }
 
         .dynamic-input {
@@ -101,13 +134,27 @@
             font-size: 16px;
             font-weight: 600;
             cursor: pointer;
-            margin-top: 24px;
+            margin-top: 16px;
         }
     </style>
 </head>
 <body>
     <h2>Add Target</h2>
 
+    <!-- Target Date Section -->
+    <div class="form-group">
+        <label>Target Date</label>
+        <div class="pill-grid" id="datePillGrid">
+            <div class="pill-btn selected" onclick="selectDateOption('today', this)">📅 Today</div>
+            <div class="pill-btn" onclick="selectDateOption('tomorrow', this)">🌅 Tomorrow</div>
+            <div class="pill-btn" onclick="selectDateOption('custom', this)">📆 Custom Date</div>
+        </div>
+        <div id="customDateDiv" class="dynamic-input">
+            <input type="date" id="customDateInput">
+        </div>
+    </div>
+
+    <!-- Subject Selection -->
     <div class="form-group">
         <label>Subject</label>
         <select id="subject" onchange="handleSubjectChange()">
@@ -122,11 +169,13 @@
         </div>
     </div>
 
+    <!-- Chapter / Topic -->
     <div class="form-group">
         <label>Chapter / Topic Name (Optional)</label>
         <input type="text" id="chapter" placeholder="e.g. Thermodynamics, Solutions, etc.">
     </div>
 
+    <!-- Task Type -->
     <div class="form-group">
         <label>Task Type</label>
         <div class="task-grid">
@@ -149,10 +198,26 @@
         </div>
     </div>
 
+    <!-- Time Slot / Deadline (Optional) -->
+    <div class="form-group">
+        <label>Time Slot / Deadline (Optional)</label>
+        <div class="pill-grid" id="timePillGrid">
+            <div class="pill-btn selected" onclick="selectTimeSlot('', this)">❌ None</div>
+            <div class="pill-btn" onclick="selectTimeSlot('Morning', this)">🌅 Morning</div>
+            <div class="pill-btn" onclick="selectTimeSlot('Afternoon', this)">☀️ Afternoon</div>
+            <div class="pill-btn" onclick="selectTimeSlot('Evening', this)">🌆 Evening</div>
+            <div class="pill-btn" onclick="selectTimeSlot('Night', this)">🌙 Night</div>
+            <div class="pill-btn" onclick="selectTimeSlot('Custom', this)">⏰ Custom...</div>
+        </div>
+        <div id="customTimeDiv" class="dynamic-input">
+            <input type="text" id="customTimeInput" placeholder="e.g. 1-6 PM, till 6, by 10 PM">
+        </div>
+    </div>
 
-    <div id="pendingTasksContainer" class="form-group" style="display: none; background: rgba(0,0,0,0.05); padding: 10px; border-radius: 8px;">
-        <label>Targets to Add:</label>
-        <ul id="pendingTasksList" style="margin: 5px 0; padding-left: 20px; font-size: 14px;"></ul>
+    <!-- Pending Tasks Preview -->
+    <div id="pendingTasksContainer" class="form-group" style="display: none; background: rgba(0,0,0,0.05); padding: 12px; border-radius: 8px;">
+        <label style="color: var(--text-color); font-weight: 600;">Targets to Add:</label>
+        <ul id="pendingTasksList" style="margin: 6px 0; padding-left: 20px; font-size: 14px; line-height: 1.6;"></ul>
     </div>
 
     <button class="submit-btn" style="background-color: #2ecc71; margin-bottom: 10px;" onclick="addTaskToList()">➕ Add Task to List</button>
@@ -161,18 +226,50 @@
     <script>
         const tg = window.Telegram.WebApp;
         tg.expand();
-
-        // Notify telegram that app is ready
         tg.ready();
 
-        // Set theme colors for UI adaptation if supported
         try {
             if (tg.themeParams.bg_color) {
                 document.body.style.backgroundColor = tg.themeParams.bg_color;
             }
         } catch(e) {}
 
+        let currentDateOption = 'today';
+        let currentTimeSlot = '';
         let currentTaskType = null;
+        let pendingTasks = [];
+
+        function selectDateOption(option, element) {
+            document.querySelectorAll('#datePillGrid .pill-btn').forEach(btn => btn.classList.remove('selected'));
+            element.classList.add('selected');
+            currentDateOption = option;
+
+            const customDiv = document.getElementById('customDateDiv');
+            if (option === 'custom') {
+                customDiv.classList.add('show');
+                const today = new Date();
+                const yyyy = today.getFullYear();
+                const mm = String(today.getMonth() + 1).padStart(2, '0');
+                const dd = String(today.getDate()).padStart(2, '0');
+                document.getElementById('customDateInput').value = `${yyyy}-${mm}-${dd}`;
+            } else {
+                customDiv.classList.remove('show');
+            }
+        }
+
+        function selectTimeSlot(slot, element) {
+            document.querySelectorAll('#timePillGrid .pill-btn').forEach(btn => btn.classList.remove('selected'));
+            element.classList.add('selected');
+
+            const customDiv = document.getElementById('customTimeDiv');
+            if (slot === 'Custom') {
+                currentTimeSlot = 'Custom';
+                customDiv.classList.add('show');
+            } else {
+                currentTimeSlot = slot;
+                customDiv.classList.remove('show');
+            }
+        }
 
         function handleSubjectChange() {
             const subject = document.getElementById('subject').value;
@@ -185,9 +282,7 @@
         }
 
         function selectTask(taskType, element) {
-            // Remove selected class from all
             document.querySelectorAll('.task-btn').forEach(btn => btn.classList.remove('selected'));
-            // Add to clicked
             element.classList.add('selected');
             currentTaskType = taskType;
 
@@ -211,9 +306,6 @@
             }
         }
 
-
-        let pendingTasks = [];
-
         function addTaskToList() {
             if (!currentTaskType) {
                 tg.showAlert("Please select a task type.");
@@ -231,10 +323,16 @@
 
             let chapter = document.getElementById('chapter').value.trim();
 
+            let timeSlot = currentTimeSlot;
+            if (timeSlot === 'Custom') {
+                timeSlot = document.getElementById('customTimeInput').value.trim();
+            }
+
             let taskObj = {
                 subject: subject,
                 chapter: chapter,
                 type: currentTaskType,
+                time_slot: timeSlot,
             };
 
             if (currentTaskType === 'Lecture' || currentTaskType === 'Questions') {
@@ -249,7 +347,7 @@
 
             pendingTasks.push(taskObj);
 
-            // Update UI
+            // Update UI list
             document.getElementById('pendingTasksContainer').style.display = 'block';
             document.getElementById('finalSubmitBtn').style.display = 'block';
 
@@ -258,11 +356,12 @@
             let taskDesc = taskObj.type;
             if (taskObj.count) taskDesc += " (" + taskObj.count + ")";
             if (taskObj.details) taskDesc = taskObj.details;
+            let timeBadge = timeSlot ? " [⏰ " + timeSlot + "]" : "";
 
-            li.innerText = subject + (chapter ? " - " + chapter : "") + ": " + taskDesc;
+            li.innerText = subject + (chapter ? " - " + chapter : "") + ": " + taskDesc + timeBadge;
             list.appendChild(li);
 
-            // Reset task selection but keep subject and chapter for fast entry
+            // Reset task type selection for rapid next entry
             document.querySelectorAll('.task-btn').forEach(btn => btn.classList.remove('selected'));
             currentTaskType = null;
             document.getElementById('numberInputDiv').classList.remove('show');
@@ -275,11 +374,32 @@
                 tg.showAlert("Please add at least one task first.");
                 return;
             }
-            // Send data array back to the bot
-            tg.sendData(JSON.stringify(pendingTasks));
+
+            let resolvedDate = "";
+            let now = new Date();
+            if (currentDateOption === 'today') {
+                const yyyy = now.getFullYear();
+                const mm = String(now.getMonth() + 1).padStart(2, '0');
+                const dd = String(now.getDate()).padStart(2, '0');
+                resolvedDate = `${yyyy}-${mm}-${dd}`;
+            } else if (currentDateOption === 'tomorrow') {
+                now.setDate(now.getDate() + 1);
+                const yyyy = now.getFullYear();
+                const mm = String(now.getMonth() + 1).padStart(2, '0');
+                const dd = String(now.getDate()).padStart(2, '0');
+                resolvedDate = `${yyyy}-${mm}-${dd}`;
+            } else if (currentDateOption === 'custom') {
+                resolvedDate = document.getElementById('customDateInput').value;
+            }
+
+            let payload = {
+                date: resolvedDate,
+                tasks: pendingTasks
+            };
+
+            tg.sendData(JSON.stringify(payload));
             tg.close();
         }
-
     </script>
 </body>
 </html>

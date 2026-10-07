@@ -1,3 +1,4 @@
+import datetime
 import html
 import json
 import re
@@ -19,7 +20,7 @@ from aiogram.types import (
 
 import config
 from report_generator import generate_html_report
-from storage import TelegramStorage, render_text, today_str
+from storage import TelegramStorage, render_text, today_str, tomorrow_str
 
 router = Router()
 
@@ -46,7 +47,7 @@ async def cmd_start(m: Message, storage: TelegramStorage):
     welcome_text = (
         f"👋 <b>Welcome {html.escape(m.from_user.first_name)}!</b>\n\n"
         "Track your daily study targets, practice questions, and mock tests with real-time group sync.\n\n"
-        "Tap below to begin planning today's targets:"
+        "Tap below to begin planning today or tomorrow's targets:"
     )
 
     kb = None
@@ -98,7 +99,7 @@ async def cmd_export_report(m: Message, storage: TelegramStorage):
             "✨ <b>Features:</b>\n"
             "• 🌙 <b>Auto Dark / Light Theme</b> + manual switcher\n"
             "• ⚡ <b>Clickable Subject Filter Tabs</b> (Physics, Chem, Bio, Tests)\n"
-            "• 📈 <b>Live Question Progress</b> & Chapter Breakdowns\n\n"
+            "• 📈 <b>Live Question Progress</b>, Time Slots & Chapter Breakdowns\n\n"
             "<i>Open this HTML file in Chrome, Safari, or any browser on your phone or PC.</i>"
         )
 
@@ -165,15 +166,23 @@ async def cmd_set(m: Message, storage: TelegramStorage):
 
 
 # --------------------------------------------------------------------------- #
-#  Method 1: Web App Data Handler
+#  Method 1: Web App Data Handler (Supports Date & Time Slots)
 # --------------------------------------------------------------------------- #
 @router.message(F.web_app_data, F.chat.type == "private")
 async def handle_webapp_data(m: Message, storage: TelegramStorage):
     try:
-        data_list = json.loads(m.web_app_data.data)
-        if isinstance(data_list, dict):
-            # Fallback for single-object webapp payloads
-            data_list = [data_list]
+        raw_payload = json.loads(m.web_app_data.data)
+
+        # Handle both {date: "...", tasks: [...]} and legacy flat array [...]
+        if isinstance(raw_payload, dict) and "tasks" in raw_payload:
+            target_date = raw_payload.get("date") or today_str()
+            data_list = raw_payload.get("tasks", [])
+        elif isinstance(raw_payload, list):
+            target_date = today_str()
+            data_list = raw_payload
+        else:
+            target_date = today_str()
+            data_list = [raw_payload]
 
         all_specs = []
         for data in data_list:
@@ -182,14 +191,14 @@ async def handle_webapp_data(m: Message, storage: TelegramStorage):
             task_type = data.get("type", "Task")
             count = data.get("count", 1)
             details = data.get("details", "")
+            time_slot = data.get("time_slot", "")
 
-            all_specs.extend(_build_specs_from_task(subject, task_type, count, details, chapter))
+            all_specs.extend(_build_specs_from_task(subject, task_type, count, details, chapter, time_slot))
 
         user_id = m.from_user.id
         user_name = m.from_user.full_name
-        date = today_str()
-        await storage.add_tasks(user_id, date, all_specs)
-        await storage.publish_pair(user_id, date, m.chat.id, user_name=user_name)
+        await storage.add_tasks(user_id, target_date, all_specs)
+        await storage.publish_pair(user_id, target_date, m.chat.id, user_name=user_name)
 
     except Exception as e:
         await m.answer(f"❌ Failed to process WebApp data: {e}")
@@ -197,90 +206,122 @@ async def handle_webapp_data(m: Message, storage: TelegramStorage):
 
 # --------------------------------------------------------------------------- #
 #  Method 2: Quick Syntax Parsing (/target or /q)
+#  Supports:
+#  - Date prefix: tomorrow, today, or YYYY-MM-DD
+#  - Time tags: @morning, @afternoon, @till-6, @1-6pm, time:1-6
 # --------------------------------------------------------------------------- #
 @router.message(Command("target", "q"), F.chat.type == "private")
 async def cmd_target(m: Message, storage: TelegramStorage):
     text = re.sub(r"^/(target|q)\s*", "", m.text, flags=re.IGNORECASE).strip()
     if not text:
-        return await m.answer("Usage: /target phy L2 Q50 ncert custom topic\n(or /q phy L2 Q50 ...)")
+        return await m.answer(
+            "Usage:\n"
+            "• <code>/target phy L2 Q50 ncert Thermodynamics</code>\n"
+            "• <code>/target tomorrow phy L2 @morning Q50 @till-6 Thermodynamics</code>"
+        )
 
     parts = text.split()
+    target_date = today_str()
+
+    # Check for date prefix
+    if parts:
+        first_word = parts[0].lower()
+        if first_word == "tomorrow":
+            target_date = tomorrow_str()
+            parts = parts[1:]
+        elif first_word == "today":
+            target_date = today_str()
+            parts = parts[1:]
+        elif re.match(r"^\d{4}-\d{2}-\d{2}$", first_word):
+            target_date = first_word
+            parts = parts[1:]
+
     subject = "General"
 
-    # Check first part for subject
-    first = parts[0].lower()
-    if first in ["phy", "physics"]:
-        subject = "Physics"
-        parts = parts[1:]
-    elif first in ["chem", "chemistry"]:
-        subject = "Chemistry"
-        parts = parts[1:]
-    elif first in ["bio", "biology"]:
-        subject = "Biology"
-        parts = parts[1:]
-    elif first == "test":
-        subject = "Test"
-        parts = parts[1:]
+    # Check for subject
+    if parts:
+        first = parts[0].lower()
+        if first in ["phy", "physics"]:
+            subject = "Physics"
+            parts = parts[1:]
+        elif first in ["chem", "chemistry"]:
+            subject = "Chemistry"
+            parts = parts[1:]
+        elif first in ["bio", "biology"]:
+            subject = "Biology"
+            parts = parts[1:]
+        elif first == "test":
+            subject = "Test"
+            parts = parts[1:]
 
     custom_parts = []
-    tasks_to_add = []  # list of (type, count)
+    tasks_to_add = []  # list of (type, count, time_slot)
+    current_time_slot = ""
 
     for part in parts:
-        if re.match(r"^L\d+$", part, re.IGNORECASE):
-            tasks_to_add.append(("Lecture", int(part[1:])))
+        # Check time slot tags (@morning, @till-6, @1-6pm, etc.)
+        if part.startswith("@") and len(part) > 1:
+            current_time_slot = part[1:].replace("-", " ")
+        elif part.lower().startswith("time:"):
+            current_time_slot = part[5:]
+        elif re.match(r"^L\d+$", part, re.IGNORECASE):
+            tasks_to_add.append(("Lecture", int(part[1:]), current_time_slot))
         elif re.match(r"^Q\d+$", part, re.IGNORECASE):
-            tasks_to_add.append(("Questions", int(part[1:])))
+            tasks_to_add.append(("Questions", int(part[1:]), current_time_slot))
         elif part.lower() in ["ncert", "rev", "revision", "notes"]:
             ttype = "NCERT" if part.lower() == "ncert" else ("Revision" if part.lower().startswith("rev") else "Short Notes")
-            tasks_to_add.append((ttype, 1))
+            tasks_to_add.append((ttype, 1, current_time_slot))
         else:
             custom_parts.append(part)
 
     chapter = " ".join(custom_parts) if custom_parts else ""
 
     specs = []
-    for ttype, count in tasks_to_add:
-        specs.extend(_build_specs_from_task(subject, ttype, count, "", chapter))
+    for ttype, count, slot in tasks_to_add:
+        specs.extend(_build_specs_from_task(subject, ttype, count, "", chapter, slot or current_time_slot))
 
     # If only custom words were given without specific markers, treat whole thing as custom task
     if not specs and custom_parts:
-        specs.extend(_build_specs_from_task(subject, "Custom", 1, chapter, chapter))
+        specs.extend(_build_specs_from_task(subject, "Custom", 1, chapter, chapter, current_time_slot))
 
     if not specs:
-        return await m.answer("No valid targets found in quick syntax. Example: /target phy L2 Q50 ncert Thermodynamics")
+        return await m.answer("No valid targets found in quick syntax. Example: /target tomorrow phy L2 @morning Q50 @till-6 Thermodynamics")
 
     user_id = m.from_user.id
     user_name = m.from_user.full_name
-    date = today_str()
-    await storage.add_tasks(user_id, date, specs)
-    await storage.publish_pair(user_id, date, m.chat.id, user_name=user_name)
+    await storage.add_tasks(user_id, target_date, specs)
+    await storage.publish_pair(user_id, target_date, m.chat.id, user_name=user_name)
 
 
-def _build_specs_from_task(subject: str, task_type: str, count: int, details: str, chapter: str = "") -> list:
+def _build_specs_from_task(subject: str, task_type: str, count: int, details: str, chapter: str = "", time_slot: str = "") -> list:
     specs = []
     display_title = chapter or subject
     if task_type == "Lecture":
         for i in range(1, count + 1):
             specs.append({
                 "label": f"Lecture {i} ({display_title})",
-                "kind": "task"
+                "kind": "task",
+                "time_slot": time_slot,
             })
     elif task_type == "Questions":
         specs.append({
             "label": f"Questions ({display_title})",
             "kind": "questions",
             "total_q": count,
-            "solved_q": 0
+            "solved_q": 0,
+            "time_slot": time_slot,
         })
     elif task_type == "Custom":
         label_text = details if details else display_title
         specs.append({
             "label": f"{label_text} ({subject})" if details and subject != "General" else label_text,
-            "kind": "task"
+            "kind": "task",
+            "time_slot": time_slot,
         })
     else:
         specs.append({
             "label": f"{task_type} ({display_title})",
-            "kind": "task"
+            "kind": "task",
+            "time_slot": time_slot,
         })
     return specs
