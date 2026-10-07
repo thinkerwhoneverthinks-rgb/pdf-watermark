@@ -70,7 +70,8 @@ A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, an
 
 * **Dual-Sync Mirroring**: Checklist is published to both the user's private DM and their linked group topic. Tapping a task in either location updates both messages instantly.
 * **In-Place Updates**: Adding more targets later in the day automatically updates today's existing checklist messages without creating duplicate spam in the group topic.
-* **Question Tracking**: Incremental or absolute question logging (e.g. `50` sets `50/81`, while `+10` adds 10 more).
+* **Question Tracking**: Incremental or absolute question logging (e.g. `50` sets `50/81`, while `+10` adds 10 more). Tapping questions sends progress prompt to DM and group, allows entering question number in DM, and broadcasts question completion updates to the group topic.
+* **Target Management & Deletion (`/delete`)**: Interactive menu allowing users to delete specific individual targets or all targets for today, tomorrow, or any custom date.
 * **Test Score Recording**: Tap `[📝 Enter Score]` to input exam/mock test results (e.g., `620/720`) with instant synchronization.
 * **🔒 48-Hour Lock Rule**: Targets older than 48 hours are permanently locked and cannot be retroactively modified, keeping past records authentic and compacting storage.
 
@@ -128,7 +129,7 @@ A production-ready Telegram Bot built with **Python 3.11+**, **aiogram 3.x**, an
 | `/export` | Private DM | Generates and sends your standalone interactive HTML dashboard |
 | `/set` | Group / Topic | Links the specific group forum topic to your account |
 | `/set` | Private DM | Displays current linked topic status and instructions |
-| `/delete` | Private DM | Deletes today's targets or targets for a specified date |
+| `/delete [date]` | Private DM | Interactive menu to delete specific individual targets or all targets |
 | Direct Multiline Text | Private DM | Parses raw subject and study target blocks |
 | WebApp Button | Private DM | Opens visual builder for multi-target entry |
 

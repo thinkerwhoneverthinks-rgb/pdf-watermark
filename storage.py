@@ -429,7 +429,7 @@ class TelegramStorage:
                 ))
         await asyncio.gather(*jobs)
 
-    async def delete_task(self, user_id: int, date: str, task_id: str, pair_index: int) -> bool:
+    async def delete_task(self, user_id: int, date: str, task_id: str, pair_index: int = -1) -> bool:
         """Delete a single task and sync both messages."""
         if is_date_locked(date):
             return False
@@ -444,14 +444,35 @@ class TelegramStorage:
                 return False
 
             del day["tasks"][task_id]
-            if not day.get("tasks"):
+            tasks_remaining = bool(day.get("tasks"))
+            pairs = list(day.get("pairs", []))
+
+            if not tasks_remaining:
                 del state["dates"][date]
 
             await self.save(user_id, state)
-            if date in state.get("dates", {}):
-                await self.sync_pair(user_id, date, pair_index)
+
+            if tasks_remaining:
+                if pair_index >= 0 and pair_index < len(pairs):
+                    await self.sync_pair(user_id, date, pair_index)
+                else:
+                    for p_idx in range(len(pairs)):
+                        await self.sync_pair(user_id, date, p_idx)
+            else:
+                jobs = []
+                for pair in pairs:
+                    text = f"🗑️ All targets for <code>{date}</code> have been deleted."
+                    for side in ("dm", "topic"):
+                        target = pair.get(side)
+                        if target:
+                            jobs.append(safe_edit_message(
+                                self.bot, target["chat_id"], target["message_id"], text, None
+                            ))
+                if jobs:
+                    await asyncio.gather(*jobs)
             return True
-        except Exception:
+        except Exception as e:
+            log.warning("delete_task error: %s", e)
             return False
 
     async def delete_date(self, user_id: int, date: str) -> bool:
@@ -462,9 +483,22 @@ class TelegramStorage:
         try:
             state = await self.load(user_id)
             if date in state.get("dates", {}):
+                pairs = list(state["dates"][date].get("pairs", []))
                 del state["dates"][date]
                 await self.save(user_id, state)
+                jobs = []
+                for pair in pairs:
+                    text = f"🗑️ All targets for <code>{date}</code> have been deleted."
+                    for side in ("dm", "topic"):
+                        target = pair.get(side)
+                        if target:
+                            jobs.append(safe_edit_message(
+                                self.bot, target["chat_id"], target["message_id"], text, None
+                            ))
+                if jobs:
+                    await asyncio.gather(*jobs)
                 return True
             return False
-        except Exception:
+        except Exception as e:
+            log.warning("delete_date error: %s", e)
             return False

@@ -6,10 +6,11 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.base import StorageKey
 from aiogram.types import CallbackQuery, Message, InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
-from storage import TelegramStorage, is_date_locked
+from storage import TelegramStorage, is_date_locked, today_str, tomorrow_str, render_text
 
 router = Router()
 
@@ -206,7 +207,8 @@ async def toggle(cb: CallbackQuery, storage: TelegramStorage):
 
 
 # --------------------------------------------------------------------------- #
-#  Question entry flow (dual-sync + authorization + 48h lock)
+# --------------------------------------------------------------------------- #
+#  Question entry flow (dual-sync + authorization + 48h lock + group updates)
 # --------------------------------------------------------------------------- #
 @router.callback_query(F.data.startswith("qs|"))
 async def questions_prompt(cb: CallbackQuery, state: FSMContext, storage: TelegramStorage):
@@ -229,32 +231,87 @@ async def questions_prompt(cb: CallbackQuery, state: FSMContext, storage: Telegr
     if task.get("done"):
         return await cb.answer("Already completed! 🎉")
 
-    await state.set_state(QuestionInput.waiting)
-    await state.update_data(owner_id=owner_id, date=date, pair_index=pair_index, task_id=task_id)
-    await cb.answer()
-
     total_q = task.get("total_q", 0)
     current_q = task.get("solved_q", 0)
+    task_label = task.get("label", "Questions")
 
+    # Set state for DM chat so sending question numbers in DM works 100%
+    dm_key = StorageKey(bot_id=cb.bot.id, chat_id=owner_id, user_id=owner_id)
+    dm_state = FSMContext(storage=state.storage, key=dm_key)
+    await dm_state.set_state(QuestionInput.waiting)
+    await dm_state.update_data(
+        owner_id=owner_id, date=date, pair_index=pair_index, task_id=task_id,
+        task_label=task_label, total_q=total_q
+    )
+
+    # If tapped in a group, also set state on the group chat context
+    if cb.message.chat.id != owner_id:
+        await state.set_state(QuestionInput.waiting)
+        await state.update_data(
+            owner_id=owner_id, date=date, pair_index=pair_index, task_id=task_id,
+            task_label=task_label, total_q=total_q
+        )
+
+    await cb.answer()
+
+    # Send prompt to user in private DM
     try:
         await cb.bot.send_message(
-            cb.from_user.id,
+            owner_id,
             f"✍️ <b>Question Progress</b> (Target: {total_q})\n"
+            f"Task: <b>{html.escape(task_label)}</b>\n"
             f"Currently solved: <b>{current_q} / {total_q}</b>\n\n"
             "Send the total questions solved so far (e.g. <code>50</code>) or send <code>+10</code> to add more:",
         )
     except Exception:
-        await cb.answer(
-            "Open a DM with me first, then tap the button again.",
-            show_alert=True,
-        )
+        pass
+
+    # Send message in group reporting current solved count and prompting for update
+    user_name = store_state.get("user_name") or cb.from_user.full_name
+    escaped_name = html.escape(user_name)
+    user_link = f"<a href=\"tg://user?id={owner_id}\">{escaped_name}</a>"
+
+    cfg = store_state.get("config", {})
+    if cb.message.chat.type in ("group", "supergroup"):
+        group_id = cb.message.chat.id
+        topic_id = cb.message.message_thread_id
+    else:
+        group_id = cfg.get("group_chat_id") or config.GROUP_CHAT_ID
+        topic_id = cfg.get("topic_thread_id") or config.TOPIC_THREAD_ID
+
+    if group_id:
+        try:
+            await cb.bot.send_message(
+                group_id,
+                f"✍️ <b>Question Progress</b> • {user_link}\n"
+                f"Task: <b>{html.escape(task_label)}</b>\n"
+                f"Currently solved: <b>{current_q} / {total_q}</b>\n\n"
+                "Send the total questions solved so far (e.g. <code>50</code> or <code>+10</code>) in DM or reply here:",
+                message_thread_id=topic_id,
+            )
+        except Exception:
+            pass
 
 
 @router.message(QuestionInput.waiting, F.text.regexp(r"^\+?\d+$"))
 async def questions_received(m: Message, state: FSMContext, storage: TelegramStorage):
     raw_text = m.text.strip()
     data = await state.get_data()
+
+    # Fallback to DM state if message came in private DM but callback was elsewhere
+    if not data or "owner_id" not in data:
+        dm_key = StorageKey(bot_id=m.bot.id, chat_id=m.from_user.id, user_id=m.from_user.id)
+        dm_state = FSMContext(storage=state.storage, key=dm_key)
+        data = await dm_state.get_data()
+
+    # Clear both contexts so user is not stuck in state
     await state.clear()
+    dm_key = StorageKey(bot_id=m.bot.id, chat_id=m.from_user.id, user_id=m.from_user.id)
+    dm_state = FSMContext(storage=state.storage, key=dm_key)
+    await dm_state.clear()
+
+    if not data or "owner_id" not in data:
+        return await m.answer("⚠️ No active question session. Tap the questions button on your checklist first.")
 
     owner_id = data["owner_id"]
     date = data["date"]
@@ -266,20 +323,46 @@ async def questions_received(m: Message, state: FSMContext, storage: TelegramSto
 
     store_state = await storage.load(owner_id)
     task = store_state.get("dates", {}).get(date, {}).get("tasks", {}).get(task_id, {})
+    total_q = task.get("total_q", data.get("total_q", 0))
+    task_label = task.get("label", data.get("task_label", "Questions"))
 
     if raw_text.startswith("+"):
-        # Incremental addition
         delta = int(raw_text[1:])
         new_solved = task.get("solved_q", 0) + delta
     else:
-        # Absolute count
         new_solved = int(raw_text)
 
     done = await storage.set_questions_solved(owner_id, date, pair_index, task_id, new_solved)
+
     if done:
-        await m.answer("🎉 Target completed!")
+        feedback = f"🎉 Target completed! (<b>{min(new_solved, total_q)}/{total_q}</b> questions — {html.escape(task_label)})"
     else:
-        await m.answer(f"📝 Progress recorded: {new_solved}/{task.get('total_q', 0)} questions")
+        feedback = f"📝 Progress recorded: <b>{new_solved}/{total_q}</b> questions ({html.escape(task_label)})"
+
+    await m.answer(feedback)
+
+    # Post question update to the linked group topic as well
+    user_name = store_state.get("user_name") or m.from_user.full_name
+    escaped_name = html.escape(user_name)
+    user_link = f"<a href=\"tg://user?id={owner_id}\">{escaped_name}</a>"
+
+    cfg = store_state.get("config", {})
+    group_id = cfg.get("group_chat_id") or config.GROUP_CHAT_ID
+    topic_id = cfg.get("topic_thread_id") or config.TOPIC_THREAD_ID
+
+    if group_id:
+        try:
+            if done:
+                group_msg = f"🎉 {user_link} completed target: <b>{min(new_solved, total_q)}/{total_q}</b> questions ({html.escape(task_label)})! 🔥"
+            else:
+                group_msg = f"📝 {user_link} solved <b>{new_solved}/{total_q}</b> questions ({html.escape(task_label)})! 🎯"
+            await m.bot.send_message(
+                group_id,
+                group_msg,
+                message_thread_id=topic_id,
+            )
+        except Exception:
+            pass
 
 
 @router.message(QuestionInput.waiting)
@@ -357,13 +440,21 @@ async def score_prompt(cb: CallbackQuery, state: FSMContext):
     if is_date_locked(date):
         return await cb.answer("🔒 Locked: Targets older than 48 hours are finalized and cannot be edited.", show_alert=True)
 
-    await state.set_state(ScoreInput.waiting)
-    await state.update_data(owner_id=owner_id, date=date, pair_index=pair_index, task_id=task_id)
+    # Set state for DM chat so sending scores in DM works 100%
+    dm_key = StorageKey(bot_id=cb.bot.id, chat_id=owner_id, user_id=owner_id)
+    dm_state = FSMContext(storage=state.storage, key=dm_key)
+    await dm_state.set_state(ScoreInput.waiting)
+    await dm_state.update_data(owner_id=owner_id, date=date, pair_index=pair_index, task_id=task_id)
+
+    if cb.message.chat.id != owner_id:
+        await state.set_state(ScoreInput.waiting)
+        await state.update_data(owner_id=owner_id, date=date, pair_index=pair_index, task_id=task_id)
+
     await cb.answer()
 
     try:
         await cb.bot.send_message(
-            cb.from_user.id,
+            owner_id,
             "✍️ Send your score in the format <b>610/720</b>:",
         )
     except Exception:
@@ -377,7 +468,18 @@ async def score_prompt(cb: CallbackQuery, state: FSMContext):
 async def score_received(m: Message, state: FSMContext, storage: TelegramStorage):
     score = m.text.replace(" ", "")
     data = await state.get_data()
+    if not data or "owner_id" not in data:
+        dm_key = StorageKey(bot_id=m.bot.id, chat_id=m.from_user.id, user_id=m.from_user.id)
+        dm_state = FSMContext(storage=state.storage, key=dm_key)
+        data = await dm_state.get_data()
+
     await state.clear()
+    dm_key = StorageKey(bot_id=m.bot.id, chat_id=m.from_user.id, user_id=m.from_user.id)
+    dm_state = FSMContext(storage=state.storage, key=dm_key)
+    await dm_state.clear()
+
+    if not data or "owner_id" not in data:
+        return await m.answer("⚠️ No active score session. Tap the score button on your checklist first.")
 
     owner_id = data["owner_id"]
     date = data["date"]
@@ -416,39 +518,103 @@ async def score_invalid(m: Message):
 
 
 # --------------------------------------------------------------------------- #
-#  Deletion functionality (per-user)
+#  Deletion functionality (per-user & individual task deletion)
 # --------------------------------------------------------------------------- #
+def build_delete_keyboard(user_id: int, date: str, tasks: dict) -> InlineKeyboardMarkup:
+    rows = []
+    for task_id, task in tasks.items():
+        time_hint = f" [{task['time_slot']}]" if task.get("time_slot") else ""
+        label = f"🗑️ {task.get('label', 'Task')}{time_hint}"
+        cb_data = f"deltask|{user_id}|{date}|{task_id}"
+        rows.append([
+            InlineKeyboardButton(text=label[:60], callback_data=cb_data[:64])
+        ])
+    rows.append([
+        InlineKeyboardButton(text="💥 Delete All Targets", callback_data=f"deldate_confirm|{user_id}|{date}")
+    ])
+    rows.append([
+        InlineKeyboardButton(text="❌ Close / Done", callback_data="deldate_cancel")
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.message(Command("delete"), F.chat.type == "private")
 async def cmd_delete_date(m: Message, storage: TelegramStorage):
-    """Delete all targets for a specific date from user's state."""
-    from storage import today_str
+    """Delete individual targets or all targets for a date from user's state."""
     text = m.text.strip()
     args = text.split()
     user_id = m.from_user.id
 
+    state = await storage.load(user_id)
+    user_dates = state.get("dates", {})
+
     if len(args) > 1:
-        date = args[1]
+        first_arg = args[1].lower()
+        if first_arg == "tomorrow":
+            date = tomorrow_str()
+        elif first_arg == "today":
+            date = today_str()
+        else:
+            date = args[1]
     else:
-        date = today_str()
+        # Default to today; if today has no targets and tomorrow has targets, choose tomorrow
+        if today_str() in user_dates and user_dates[today_str()].get("tasks"):
+            date = today_str()
+        elif tomorrow_str() in user_dates and user_dates[tomorrow_str()].get("tasks"):
+            date = tomorrow_str()
+        else:
+            date = today_str()
 
     if is_date_locked(date):
         return await m.answer(f"🔒 Targets for <code>{date}</code> are older than 48 hours and locked.")
 
-    state = await storage.load(user_id)
-    day = state.get("dates", {}).get(date)
-
+    day = user_dates.get(date)
     if not day or not day.get("tasks"):
-        return await m.answer(f"❌ No targets found for <code>{date}</code>")
+        return await m.answer(
+            f"❌ No targets found for <code>{date}</code>.\n\n"
+            "Tip: You can specify dates like <code>/delete tomorrow</code> or <code>/delete YYYY-MM-DD</code>."
+        )
 
-    from storage import render_text
-    text_content = render_text(date, day["tasks"], user_id=user_id, user_name=m.from_user.full_name, title="🗑️ Delete these targets?")
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Yes, Delete All", callback_data=f"deldate_confirm|{user_id}|{date}"),
-        InlineKeyboardButton(text="❌ Cancel", callback_data="deldate_cancel"),
-    ]])
-
+    text_content = (
+        f"🗑️ <b>Manage / Delete Targets</b> • <code>{date}</code>\n\n"
+        "Tap an individual target below to delete it, or choose <b>Delete All</b>:"
+    )
+    kb = build_delete_keyboard(user_id, date, day["tasks"])
     await m.answer(text_content, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("deltask|"))
+async def delete_single_task(cb: CallbackQuery, storage: TelegramStorage):
+    """Delete an individual target and refresh the deletion menu."""
+    parts = cb.data.split("|")
+    owner_id = int(parts[1])
+    date = parts[2]
+    task_id = parts[3]
+
+    if cb.from_user.id != owner_id:
+        return await cb.answer("⚠️ You can only delete your own targets.", show_alert=True)
+
+    if is_date_locked(date):
+        return await cb.answer("🔒 Targets older than 48 hours are locked.", show_alert=True)
+
+    success = await storage.delete_task(owner_id, date, task_id)
+    if not success:
+        return await cb.answer("❌ Could not delete target (already removed or locked).", show_alert=True)
+
+    await cb.answer("🗑️ Target deleted!")
+
+    # Reload state to check if more tasks remain
+    state = await storage.load(owner_id)
+    day = state.get("dates", {}).get(date)
+    if day and day.get("tasks"):
+        text_content = (
+            f"🗑️ <b>Manage / Delete Targets</b> • <code>{date}</code>\n\n"
+            "Tap an individual target below to delete it, or choose <b>Delete All</b>:"
+        )
+        kb = build_delete_keyboard(owner_id, date, day["tasks"])
+        await cb.message.edit_text(text_content, reply_markup=kb)
+    else:
+        await cb.message.edit_text(f"✅ All targets for <code>{date}</code> have been removed.", reply_markup=None)
 
 
 @router.callback_query(F.data.startswith("deldate_confirm|"))
@@ -468,7 +634,7 @@ async def confirm_delete_date(cb: CallbackQuery, storage: TelegramStorage):
     success = await storage.delete_date(owner_id, date)
 
     if success:
-        await cb.message.edit_text(f"✅ All targets for <code>{date}</code> have been deleted!")
+        await cb.message.edit_text(f"✅ All targets for <code>{date}</code> have been deleted!", reply_markup=None)
     else:
         await cb.message.edit_text("❌ Failed to delete targets")
 
@@ -476,4 +642,4 @@ async def confirm_delete_date(cb: CallbackQuery, storage: TelegramStorage):
 @router.callback_query(F.data == "deldate_cancel")
 async def cancel_delete(cb: CallbackQuery):
     await cb.answer()
-    await cb.message.edit_text("❌ Deletion cancelled")
+    await cb.message.edit_text("✅ Target deletion menu closed.", reply_markup=None)
